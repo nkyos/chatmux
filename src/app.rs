@@ -1,7 +1,8 @@
 use crate::session::SessionManager;
-use crate::tui::{render_sidebar, render_terminal};
+use crate::tui::project_picker::{PickerMode, ProjectPicker, render_project_picker};
 use crate::tui::sidebar::render_summary_bar;
 use crate::tui::terminal::render_empty_terminal;
+use crate::tui::{render_sidebar, render_terminal};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers};
 use ratatui::{
@@ -14,7 +15,7 @@ use std::time::Duration;
 enum Focus {
     Sidebar,
     Terminal,
-    ProjectInput,
+    ProjectPicker,
 }
 
 pub struct App {
@@ -23,7 +24,7 @@ pub struct App {
     focus: Focus,
     should_quit: bool,
     terminal_content: String,
-    project_input: String,
+    picker: Option<ProjectPicker>,
 }
 
 impl App {
@@ -34,7 +35,7 @@ impl App {
             focus: Focus::Sidebar,
             should_quit: false,
             terminal_content: String::new(),
-            project_input: String::new(),
+            picker: None,
         }
     }
 
@@ -43,7 +44,6 @@ impl App {
     }
 
     pub fn tick(&mut self) {
-        // Refresh terminal content for the selected session.
         if let Some(idx) = self.selected {
             if let Ok(content) = self.manager.capture(idx) {
                 self.terminal_content = content;
@@ -57,7 +57,7 @@ impl App {
             .constraints([Constraint::Length(35), Constraint::Min(1)])
             .split(frame.area());
 
-        // Sidebar area: split into list + summary bar.
+        // Sidebar: list + summary bar.
         let sidebar_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(1), Constraint::Length(1)])
@@ -72,59 +72,24 @@ impl App {
         );
         render_summary_bar(frame, sidebar_chunks[1], self.manager.sessions());
 
-        // Terminal area or project input.
-        match self.focus {
-            Focus::ProjectInput => {
-                self.draw_project_input(frame, chunks[1]);
-            }
-            _ => {
-                if self.selected.is_some() {
-                    let label = self
-                        .selected
-                        .and_then(|i| self.manager.get(i))
-                        .map(|s| s.display_label().to_string());
-                    render_terminal(
-                        frame,
-                        chunks[1],
-                        &self.terminal_content,
-                        label.as_deref(),
-                        self.focus == Focus::Terminal,
-                    );
-                } else {
-                    render_empty_terminal(frame, chunks[1]);
-                }
-            }
+        // Right pane: project picker or terminal.
+        if let Some(ref picker) = self.picker {
+            render_project_picker(frame, chunks[1], picker);
+        } else if self.selected.is_some() {
+            let label = self
+                .selected
+                .and_then(|i| self.manager.get(i))
+                .map(|s| s.display_label().to_string());
+            render_terminal(
+                frame,
+                chunks[1],
+                &self.terminal_content,
+                label.as_deref(),
+                self.focus == Focus::Terminal,
+            );
+        } else {
+            render_empty_terminal(frame, chunks[1]);
         }
-    }
-
-    fn draw_project_input(&self, frame: &mut Frame, area: Rect) {
-        use ratatui::style::{Color, Style};
-        use ratatui::text::{Line, Span};
-        use ratatui::widgets::{Block, Borders, Paragraph};
-
-        let block = Block::default()
-            .title(" New Session — Enter project path ")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Cyan));
-
-        let lines = vec![
-            Line::from(""),
-            Line::from(vec![
-                Span::raw("  Path: "),
-                Span::styled(
-                    format!("{}_", &self.project_input),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  Enter: confirm  Esc: cancel  Tab: expand ~",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ];
-
-        let paragraph = Paragraph::new(lines).block(block);
-        frame.render_widget(paragraph, area);
     }
 
     pub fn handle_event(&mut self) -> Result<()> {
@@ -133,7 +98,7 @@ impl App {
                 match self.focus {
                     Focus::Sidebar => self.handle_sidebar_key(key.code, key.modifiers)?,
                     Focus::Terminal => self.handle_terminal_key(key.code, key.modifiers)?,
-                    Focus::ProjectInput => self.handle_project_input_key(key.code)?,
+                    Focus::ProjectPicker => self.handle_picker_key(key.code)?,
                 }
             }
         }
@@ -154,8 +119,8 @@ impl App {
                 }
             }
             KeyCode::Char('n') => {
-                self.project_input.clear();
-                self.focus = Focus::ProjectInput;
+                self.picker = Some(ProjectPicker::new());
+                self.focus = Focus::ProjectPicker;
             }
             KeyCode::Char('d') => {
                 if let Some(idx) = self.selected {
@@ -174,7 +139,6 @@ impl App {
     }
 
     fn handle_terminal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
-        // Esc returns to sidebar.
         if code == KeyCode::Esc {
             self.focus = Focus::Sidebar;
             return Ok(());
@@ -184,7 +148,6 @@ impl App {
             return Ok(());
         };
 
-        // Forward keys to tmux.
         match code {
             KeyCode::Char(c) => {
                 if modifiers.contains(KeyModifiers::CONTROL) {
@@ -193,76 +156,67 @@ impl App {
                 } else {
                     self.manager
                         .tmux()
-                        .send_key_literal(&self.manager.get(idx).unwrap().name, &c.to_string())?;
+                        .send_key_literal(
+                            &self.manager.get(idx).unwrap().name,
+                            &c.to_string(),
+                        )?;
                 }
             }
-            KeyCode::Enter => {
-                self.manager.send_keys(idx, "Enter")?;
-            }
-            KeyCode::Backspace => {
-                self.manager.send_keys(idx, "BSpace")?;
-            }
-            KeyCode::Tab => {
-                self.manager.send_keys(idx, "Tab")?;
-            }
-            KeyCode::Up => {
-                self.manager.send_keys(idx, "Up")?;
-            }
-            KeyCode::Down => {
-                self.manager.send_keys(idx, "Down")?;
-            }
-            KeyCode::Left => {
-                self.manager.send_keys(idx, "Left")?;
-            }
-            KeyCode::Right => {
-                self.manager.send_keys(idx, "Right")?;
-            }
+            KeyCode::Enter => self.manager.send_keys(idx, "Enter")?,
+            KeyCode::Backspace => self.manager.send_keys(idx, "BSpace")?,
+            KeyCode::Tab => self.manager.send_keys(idx, "Tab")?,
+            KeyCode::Up => self.manager.send_keys(idx, "Up")?,
+            KeyCode::Down => self.manager.send_keys(idx, "Down")?,
+            KeyCode::Left => self.manager.send_keys(idx, "Left")?,
+            KeyCode::Right => self.manager.send_keys(idx, "Right")?,
             _ => {}
         }
         Ok(())
     }
 
-    fn handle_project_input_key(&mut self, code: KeyCode) -> Result<()> {
+    fn handle_picker_key(&mut self, code: KeyCode) -> Result<()> {
+        let Some(ref mut picker) = self.picker else {
+            return Ok(());
+        };
+
         match code {
             KeyCode::Esc => {
-                self.focus = Focus::Sidebar;
-            }
-            KeyCode::Enter => {
-                let path = self.resolve_path(&self.project_input.clone());
-                if std::path::Path::new(&path).is_dir() {
-                    let idx = self.manager.create(&path)?;
-                    self.selected = Some(idx);
+                if picker.mode == PickerMode::DirectoryBrowser {
+                    picker.back_to_recent();
+                } else {
+                    self.picker = None;
                     self.focus = Focus::Sidebar;
                 }
-                // TODO: show error if path is invalid
             }
-            KeyCode::Tab => {
-                // Expand ~ to home directory.
-                if self.project_input.starts_with('~') {
-                    if let Some(home) = dirs_home() {
-                        self.project_input =
-                            self.project_input.replacen('~', &home, 1);
-                    }
+            KeyCode::Char('j') | KeyCode::Down => picker.move_down(),
+            KeyCode::Char('k') | KeyCode::Up => picker.move_up(),
+            KeyCode::Enter => {
+                if let Some(path) = picker.confirm() {
+                    self.create_session(&path)?;
                 }
             }
-            KeyCode::Char(c) => {
-                self.project_input.push(c);
+            KeyCode::Char(' ') => {
+                // In browser mode, select current directory.
+                if let Some(path) = picker.select_current_dir() {
+                    self.create_session(&path)?;
+                }
             }
             KeyCode::Backspace => {
-                self.project_input.pop();
+                if picker.mode == PickerMode::DirectoryBrowser {
+                    picker.go_up();
+                }
             }
             _ => {}
         }
         Ok(())
     }
 
-    fn resolve_path(&self, input: &str) -> String {
-        if input.starts_with('~') {
-            if let Some(home) = dirs_home() {
-                return input.replacen('~', &home, 1);
-            }
-        }
-        input.to_string()
+    fn create_session(&mut self, path: &str) -> Result<()> {
+        let idx = self.manager.create(path)?;
+        self.selected = Some(idx);
+        self.picker = None;
+        self.focus = Focus::Sidebar;
+        Ok(())
     }
 
     fn select_next(&mut self) {
@@ -289,10 +243,8 @@ impl App {
         self.manager.cleanup();
     }
 
-    /// Resize the selected session's tmux pane to match the terminal view.
     pub fn resize_selected_pane(&self, terminal_area: Rect) {
         if let Some(idx) = self.selected {
-            // Subtract 2 for the border.
             let width = terminal_area.width.saturating_sub(2);
             let height = terminal_area.height.saturating_sub(2);
             if width > 0 && height > 0 {
@@ -300,8 +252,4 @@ impl App {
             }
         }
     }
-}
-
-fn dirs_home() -> Option<String> {
-    std::env::var("HOME").ok()
 }

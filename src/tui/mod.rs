@@ -1,3 +1,4 @@
+pub mod project_picker;
 pub mod sidebar;
 pub mod terminal;
 

@@ -1,4 +1,5 @@
 mod app;
+mod projects;
 mod session;
 mod tmux;
 mod tui;
