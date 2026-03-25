@@ -102,6 +102,43 @@ impl TmuxClient {
         Ok(())
     }
 
+    /// List all chatmux-managed tmux sessions that are still alive.
+    /// Returns session names without the "chatmux-" prefix.
+    pub fn list_chatmux_sessions(&self) -> Vec<String> {
+        let output = Command::new("tmux")
+            .args(["list-sessions", "-F", "#{session_name}"])
+            .output();
+
+        let Ok(output) = output else {
+            return Vec::new();
+        };
+
+        if !output.status.success() {
+            return Vec::new();
+        }
+
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.strip_prefix(SESSION_PREFIX))
+            .map(|s| s.to_string())
+            .collect()
+    }
+
+    /// Get the current working directory of a tmux session's pane.
+    pub fn get_pane_cwd(&self, session_name: &str) -> Option<String> {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let output = Command::new("tmux")
+            .args(["display-message", "-t", &full_name, "-p", "#{pane_current_path}"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let cwd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if cwd.is_empty() { None } else { Some(cwd) }
+        } else {
+            None
+        }
+    }
+
     /// Check if a tmux session is still alive.
     pub fn has_session(&self, session_name: &str) -> bool {
         let full_name = format!("{SESSION_PREFIX}{session_name}");

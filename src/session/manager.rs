@@ -1,6 +1,8 @@
 use super::model::{Session, SessionStatus};
+use super::state::{self, SavedState, SessionEntry};
 use crate::tmux::TmuxClient;
 use anyhow::Result;
+use std::collections::HashSet;
 
 pub struct SessionManager {
     sessions: Vec<Session>,
@@ -118,11 +120,81 @@ impl SessionManager {
         }
     }
 
-    /// Kill all managed tmux sessions. Call on shutdown.
-    pub fn cleanup(&mut self) {
-        for session in &self.sessions {
-            let _ = self.tmux.kill_session(&session.name);
+    /// Restore sessions from saved state + live tmux sessions.
+    /// Only restores sessions whose tmux session is still alive.
+    pub fn restore(&mut self) {
+        let live: HashSet<String> = self.tmux.list_chatmux_sessions().into_iter().collect();
+
+        if let Some(saved) = state::load() {
+            // Restore from saved state, but only if tmux session is alive.
+            for entry in saved.sessions {
+                if live.contains(&entry.name) {
+                    let mut session = Session::new(entry.name, entry.cwd);
+                    session.project_name = entry.project_name;
+                    session.task_label = entry.task_label;
+                    session.status = SessionStatus::Idle;
+                    self.sessions.push(session);
+                }
+            }
+            self.next_id = saved.next_id;
+        } else {
+            // No state file — reconstruct from live tmux sessions.
+            for name in &live {
+                let cwd = self
+                    .tmux
+                    .get_pane_cwd(name)
+                    .unwrap_or_else(|| "/".to_string());
+                let session = Session::new(name.clone(), cwd);
+                self.sessions.push(session);
+            }
         }
+
+        // Ensure next_id is higher than any restored session.
+        for session in &self.sessions {
+            if let Some(num) = session
+                .name
+                .strip_prefix('s')
+                .and_then(|n| n.parse::<usize>().ok())
+            {
+                self.next_id = self.next_id.max(num + 1);
+            }
+        }
+    }
+
+    /// Save current session state to disk.
+    pub fn save_state(&self) {
+        let saved = SavedState {
+            sessions: self
+                .sessions
+                .iter()
+                .map(|s| SessionEntry {
+                    name: s.name.clone(),
+                    cwd: s.cwd.clone(),
+                    project_name: s.project_name.clone(),
+                    task_label: s.task_label.clone(),
+                })
+                .collect(),
+            next_id: self.next_id,
+        };
+        let _ = state::save(&saved);
+    }
+
+    /// Kill all chatmux tmux sessions (including orphaned ones not tracked by this manager).
+    pub fn kill_all_chatmux_sessions(&self) {
+        for name in self.tmux.list_chatmux_sessions() {
+            let _ = self.tmux.kill_session(&name);
+        }
+    }
+
+    /// Detach: save state and exit without killing tmux sessions.
+    pub fn detach(&self) {
+        self.save_state();
+    }
+
+    /// Kill all managed tmux sessions and remove state file. Call on full shutdown.
+    pub fn cleanup(&mut self) {
+        self.kill_all_chatmux_sessions();
         self.sessions.clear();
+        state::remove();
     }
 }

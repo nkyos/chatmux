@@ -1,4 +1,5 @@
 mod app;
+mod jsonl;
 mod projects;
 mod session;
 mod tmux;

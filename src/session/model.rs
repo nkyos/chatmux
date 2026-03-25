@@ -1,4 +1,5 @@
-use std::time::Instant;
+use std::path::PathBuf;
+use std::time::{Instant, SystemTime};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionStatus {
@@ -44,6 +45,10 @@ pub struct Session {
     pub created_at: Instant,
     /// When the last activity was detected.
     pub last_activity: Instant,
+    /// Cached path to the active JSONL file (resolved lazily).
+    pub jsonl_path: Option<PathBuf>,
+    /// Last known modification time of the JSONL file.
+    pub jsonl_modified: Option<SystemTime>,
 }
 
 impl Session {
@@ -62,6 +67,8 @@ impl Session {
             status: SessionStatus::Working,
             created_at: now,
             last_activity: now,
+            jsonl_path: None,
+            jsonl_modified: None,
         }
     }
 
