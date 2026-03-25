@@ -111,6 +111,8 @@ impl App {
 
     /// Check JSONL files for each session and update their status.
     fn poll_session_statuses(&mut self) {
+        use crate::session::SessionStatus;
+
         for session in self.manager.sessions_mut() {
             // Lazily resolve the JSONL path.
             if session.jsonl_path.is_none() {
@@ -130,9 +132,15 @@ impl App {
 
             // Detect status from the JSONL tail.
             if let Some(detected) = jsonl::detect_status(jsonl_path) {
-                if session.status != detected.status {
-                    session.status = detected.status;
+                let old_status = session.status.clone();
+                if old_status != detected.status {
+                    session.status = detected.status.clone();
                     session.last_activity = Instant::now();
+
+                    // Send macOS notification on transition to Replied.
+                    if detected.status == SessionStatus::Replied {
+                        crate::notify::notify_replied(&session.project_name);
+                    }
                 }
             }
         }
@@ -267,6 +275,14 @@ impl App {
                 self.picker = Some(ProjectPicker::new());
                 self.focus = Focus::ProjectPicker;
             }
+            KeyCode::Char('e') => {
+                // Open selected session's project directory in $EDITOR.
+                if let Some(idx) = self.selected {
+                    if let Some(session) = self.manager.get(idx) {
+                        self.open_editor(&session.cwd.clone())?;
+                    }
+                }
+            }
             KeyCode::Char('d') => {
                 if let Some(idx) = self.selected {
                     self.manager.remove(idx)?;
@@ -384,6 +400,21 @@ impl App {
             Some(i) => i.saturating_sub(1),
             None => 0,
         });
+    }
+
+    /// Open the project directory in $EDITOR.
+    fn open_editor(&self, cwd: &str) -> Result<()> {
+        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "code".into());
+
+        // Spawn detached — works for GUI editors (code, cursor, zed, etc.).
+        std::process::Command::new(&editor)
+            .arg(cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok();
+        Ok(())
     }
 
     pub fn cleanup(&mut self) {

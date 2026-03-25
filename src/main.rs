@@ -1,5 +1,6 @@
 mod app;
 mod jsonl;
+mod notify;
 mod projects;
 mod session;
 mod tmux;
