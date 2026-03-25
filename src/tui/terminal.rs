@@ -1,3 +1,4 @@
+use ansi_to_tui::IntoText;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
@@ -29,9 +30,12 @@ pub fn render_terminal(
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color));
 
-    // For now, render the raw text from capture-pane.
-    // ANSI codes will show as raw text until we add a parser.
-    let text = Text::raw(content);
+    // Parse ANSI escape sequences into ratatui styled text.
+    let text = content
+        .as_bytes()
+        .into_text()
+        .unwrap_or_else(|_| Text::raw(content));
+
     let paragraph = Paragraph::new(text).block(block);
     frame.render_widget(paragraph, area);
 }
