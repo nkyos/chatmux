@@ -63,16 +63,42 @@ impl Config {
         toml::from_str(&content).unwrap_or_default()
     }
 
-    /// Get the editor command, checking config then $EDITOR then fallback.
+    /// Get the editor command.
+    /// Priority: config > $VISUAL > $EDITOR > first found CLI (cursor, code) > "open" (Finder).
     pub fn editor_command(&self) -> String {
-        self.editor
-            .command
-            .clone()
-            .or_else(|| std::env::var("EDITOR").ok())
-            .unwrap_or_else(|| "code".into())
+        if let Some(ref cmd) = self.editor.command {
+            return cmd.clone();
+        }
+        if let Ok(v) = std::env::var("VISUAL") {
+            if !v.is_empty() {
+                return v;
+            }
+        }
+        if let Ok(v) = std::env::var("EDITOR") {
+            if !v.is_empty() {
+                return v;
+            }
+        }
+        // Auto-detect installed GUI editors.
+        for candidate in &["cursor", "code", "zed"] {
+            if command_exists(candidate) {
+                return (*candidate).to_string();
+            }
+        }
+        // Last resort: macOS open (opens directory in Finder).
+        "open".into()
     }
 }
 
 fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|p| p.join("chatmux").join("config.toml"))
+}
+
+fn command_exists(name: &str) -> bool {
+    std::process::Command::new("which")
+        .arg(name)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success())
 }
