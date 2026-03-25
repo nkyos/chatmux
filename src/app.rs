@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::jsonl;
 use crate::session::SessionManager;
 use crate::tui::project_picker::{PickerMode, ProjectPicker, render_project_picker};
@@ -12,8 +13,6 @@ use ratatui::{
     Frame,
 };
 use std::time::{Duration, Instant};
-
-const SIDEBAR_WIDTH: u16 = 35;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -34,6 +33,7 @@ enum AppMode {
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
 pub struct App {
+    config: Config,
     manager: SessionManager,
     selected: Option<usize>,
     focus: Focus,
@@ -51,6 +51,7 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
+        let config = Config::load();
         let manager = SessionManager::new();
         let existing = manager.tmux().list_chatmux_sessions();
         let mode = if existing.is_empty() {
@@ -62,6 +63,7 @@ impl App {
         };
 
         Self {
+            config,
             manager,
             selected: None,
             focus: Focus::Sidebar,
@@ -113,6 +115,8 @@ impl App {
     fn poll_session_statuses(&mut self) {
         use crate::session::SessionStatus;
 
+        let notifications_enabled = self.config.notifications.enabled;
+
         for session in self.manager.sessions_mut() {
             // Lazily resolve the JSONL path.
             if session.jsonl_path.is_none() {
@@ -138,7 +142,7 @@ impl App {
                     session.last_activity = Instant::now();
 
                     // Send macOS notification on transition to Replied.
-                    if detected.status == SessionStatus::Replied {
+                    if notifications_enabled && detected.status == SessionStatus::Replied {
                         crate::notify::notify_replied(&session.project_name);
                     }
                 }
@@ -150,7 +154,7 @@ impl App {
     pub fn update_layout(&mut self, size: Rect) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+            .constraints([Constraint::Length(self.config.display.sidebar_width), Constraint::Min(1)])
             .split(size);
         self.terminal_area = chunks[1];
     }
@@ -167,7 +171,7 @@ impl App {
 
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+            .constraints([Constraint::Length(self.config.display.sidebar_width), Constraint::Min(1)])
             .split(frame.area());
 
         // Sidebar: list + summary bar.
@@ -402,9 +406,9 @@ impl App {
         });
     }
 
-    /// Open the project directory in $EDITOR.
+    /// Open the project directory in the configured editor.
     fn open_editor(&self, cwd: &str) -> Result<()> {
-        let editor = std::env::var("EDITOR").unwrap_or_else(|_| "code".into());
+        let editor = self.config.editor_command();
 
         // Spawn detached — works for GUI editors (code, cursor, zed, etc.).
         std::process::Command::new(&editor)

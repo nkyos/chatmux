@@ -1,4 +1,5 @@
 mod app;
+mod config;
 mod jsonl;
 mod notify;
 mod projects;
