@@ -11,10 +11,28 @@ impl TmuxClient {
     }
 
     /// Create a new tmux session running `claude` in the given directory.
-    pub fn new_session(&self, session_name: &str, cwd: &str) -> Result<()> {
+    pub fn new_session(
+        &self,
+        session_name: &str,
+        cwd: &str,
+        width: u16,
+        height: u16,
+    ) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
         let status = Command::new("tmux")
-            .args(["new-session", "-d", "-s", &full_name, "-c", cwd, "claude"])
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                &full_name,
+                "-x",
+                &width.to_string(),
+                "-y",
+                &height.to_string(),
+                "-c",
+                cwd,
+                "claude",
+            ])
             .status()
             .context("Failed to run tmux")?;
 
@@ -24,11 +42,11 @@ impl TmuxClient {
         Ok(())
     }
 
-    /// Capture the current pane content with ANSI escape sequences.
+    /// Capture the current pane content as plain text.
     pub fn capture_pane(&self, session_name: &str) -> Result<String> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
         let output = Command::new("tmux")
-            .args(["capture-pane", "-e", "-p", "-t", &full_name])
+            .args(["capture-pane", "-p", "-t", &full_name])
             .output()
             .context("Failed to run tmux capture-pane")?;
 

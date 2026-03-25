@@ -11,6 +11,8 @@ use ratatui::{
 };
 use std::time::Duration;
 
+const SIDEBAR_WIDTH: u16 = 35;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
     Sidebar,
@@ -25,6 +27,8 @@ pub struct App {
     should_quit: bool,
     terminal_content: String,
     picker: Option<ProjectPicker>,
+    /// Cached terminal area for pane sizing.
+    terminal_area: Rect,
 }
 
 impl App {
@@ -36,6 +40,7 @@ impl App {
             should_quit: false,
             terminal_content: String::new(),
             picker: None,
+            terminal_area: Rect::default(),
         }
     }
 
@@ -43,7 +48,18 @@ impl App {
         self.should_quit
     }
 
+    /// Called every frame before draw. Resizes tmux panes and captures content.
     pub fn tick(&mut self) {
+        // Resize all sessions' tmux panes to match the terminal view area.
+        let pane_width = self.terminal_area.width.saturating_sub(2);
+        let pane_height = self.terminal_area.height.saturating_sub(2);
+        if pane_width > 0 && pane_height > 0 {
+            for i in 0..self.manager.len() {
+                let _ = self.manager.resize(i, pane_width, pane_height);
+            }
+        }
+
+        // Capture content for the selected session.
         if let Some(idx) = self.selected {
             if let Ok(content) = self.manager.capture(idx) {
                 self.terminal_content = content;
@@ -51,10 +67,19 @@ impl App {
         }
     }
 
+    /// Update the cached terminal area based on the current terminal size.
+    pub fn update_layout(&mut self, size: Rect) {
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
+            .split(size);
+        self.terminal_area = chunks[1];
+    }
+
     pub fn draw(&self, frame: &mut Frame) {
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(35), Constraint::Min(1)])
+            .constraints([Constraint::Length(SIDEBAR_WIDTH), Constraint::Min(1)])
             .split(frame.area());
 
         // Sidebar: list + summary bar.
@@ -196,7 +221,6 @@ impl App {
                 }
             }
             KeyCode::Char(' ') => {
-                // In browser mode, select current directory.
                 if let Some(path) = picker.select_current_dir() {
                     self.create_session(&path)?;
                 }
@@ -212,7 +236,10 @@ impl App {
     }
 
     fn create_session(&mut self, path: &str) -> Result<()> {
-        let idx = self.manager.create(path)?;
+        // Use the terminal area size (minus borders) for the tmux pane.
+        let width = self.terminal_area.width.saturating_sub(2).max(80);
+        let height = self.terminal_area.height.saturating_sub(2).max(24);
+        let idx = self.manager.create(path, width, height)?;
         self.selected = Some(idx);
         self.picker = None;
         self.focus = Focus::Sidebar;
@@ -241,15 +268,5 @@ impl App {
 
     pub fn cleanup(&mut self) {
         self.manager.cleanup();
-    }
-
-    pub fn resize_selected_pane(&self, terminal_area: Rect) {
-        if let Some(idx) = self.selected {
-            let width = terminal_area.width.saturating_sub(2);
-            let height = terminal_area.height.saturating_sub(2);
-            if width > 0 && height > 0 {
-                let _ = self.manager.resize(idx, width, height);
-            }
-        }
     }
 }

@@ -11,10 +11,9 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 fn main() -> Result<()> {
-    // Setup terminal.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -24,7 +23,6 @@ fn main() -> Result<()> {
     let mut app = App::new();
     let result = run_loop(&mut terminal, &mut app);
 
-    // Cleanup: restore terminal and kill tmux sessions.
     app.cleanup();
     disable_raw_mode()?;
     execute!(
@@ -42,23 +40,16 @@ fn run_loop(
     app: &mut App,
 ) -> Result<()> {
     loop {
+        // Update layout first so tmux panes are resized before capture.
+        let size = terminal.size()?;
+        let size_rect = Rect::new(0, 0, size.width, size.height);
+        app.update_layout(size_rect);
+
         app.tick();
 
         terminal.draw(|frame| {
             app.draw(frame);
         })?;
-
-        // Resize the selected tmux pane to match the terminal view area.
-        let size = terminal.size()?;
-        let size_rect = ratatui::layout::Rect::new(0, 0, size.width, size.height);
-        let terminal_area = ratatui::layout::Layout::default()
-            .direction(ratatui::layout::Direction::Horizontal)
-            .constraints([
-                ratatui::layout::Constraint::Length(35),
-                ratatui::layout::Constraint::Min(1),
-            ])
-            .split(size_rect)[1];
-        app.resize_selected_pane(terminal_area);
 
         app.handle_event()?;
 

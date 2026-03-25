@@ -22,12 +22,12 @@ impl SessionManager {
     }
 
     /// Create a new session, launching claude in the given directory.
-    pub fn create(&mut self, cwd: &str) -> Result<usize> {
+    pub fn create(&mut self, cwd: &str, width: u16, height: u16) -> Result<usize> {
         let id = self.next_id;
         self.next_id += 1;
         let name = format!("s{id}");
 
-        self.tmux.new_session(&name, cwd)?;
+        self.tmux.new_session(&name, cwd, width, height)?;
 
         let session = Session::new(name, cwd.to_string());
         self.sessions.push(session);
