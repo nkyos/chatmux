@@ -237,8 +237,8 @@ impl App {
 
     fn create_session(&mut self, path: &str) -> Result<()> {
         // Use the terminal area size (minus borders) for the tmux pane.
-        let width = self.terminal_area.width.saturating_sub(2).max(80);
-        let height = self.terminal_area.height.saturating_sub(2).max(24);
+        let width = self.terminal_area.width.saturating_sub(2);
+        let height = self.terminal_area.height.saturating_sub(2);
         let idx = self.manager.create(path, width, height)?;
         self.selected = Some(idx);
         self.picker = None;
