@@ -1,10 +1,14 @@
 use crate::agent::{self, AgentKind, AgentRegistry};
 use crate::config::{Config, ResolvedTheme};
+use crate::session::model::SessionStatus;
 use crate::session::state::HistoryEntry;
 use crate::session::{SessionManager, SortMode};
 use crate::tui::project_picker::{PickerMode, ProjectPicker, render_project_picker};
 use crate::tui::render_startup_screen;
-use crate::tui::sidebar::{render_history_sidebar, render_sidebar, render_summary_bar};
+use crate::tui::sidebar::{
+    render_history_sidebar, render_project_list, render_sidebar, render_sidebar_with_title,
+    render_summary_bar, ProjectSummary,
+};
 use crate::tui::terminal::{render_empty_terminal, render_terminal};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
@@ -28,6 +32,17 @@ enum AppMode {
     Startup { existing_sessions: Vec<String> },
     /// Normal operation.
     Normal,
+}
+
+/// Which view the sidebar is currently showing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SidebarView {
+    /// Flat list of all sessions (default).
+    Sessions,
+    /// Grouped by project.
+    Projects,
+    /// Sessions within a specific project (cwd).
+    ProjectSessions(String),
 }
 
 /// How often to poll JSONL files for status changes.
@@ -77,6 +92,12 @@ pub struct App {
     history_list_state: ListState,
     /// Cached project list (computed once at startup to avoid repeated I/O).
     cached_projects: Vec<String>,
+    /// Current sidebar view mode.
+    sidebar_view: SidebarView,
+    /// Selected index in project list view.
+    project_selected: usize,
+    /// Scroll state for project list.
+    project_list_state: ListState,
 }
 
 impl App {
@@ -127,6 +148,9 @@ impl App {
             sidebar_list_state: ListState::default(),
             history_list_state: ListState::default(),
             cached_projects,
+            sidebar_view: SidebarView::Sessions,
+            project_selected: 0,
+            project_list_state: ListState::default(),
         }
     }
 
@@ -496,6 +520,64 @@ impl App {
         self.terminal_area = chunks[1];
     }
 
+    /// Build project summaries from current sessions, grouped by cwd.
+    fn build_project_summaries(&self) -> Vec<ProjectSummary> {
+        use std::collections::BTreeMap;
+        let mut map: BTreeMap<String, ProjectSummary> = BTreeMap::new();
+
+        for session in self.manager.sessions() {
+            let entry = map.entry(session.cwd.clone()).or_insert_with(|| {
+                ProjectSummary {
+                    cwd: session.cwd.clone(),
+                    project_name: session.project_name.clone(),
+                    session_count: 0,
+                    has_replied: false,
+                    has_working: false,
+                    aggregate_status: SessionStatus::Read,
+                    latest_activity_epoch: 0,
+                }
+            });
+            entry.session_count += 1;
+            if session.last_activity_epoch > entry.latest_activity_epoch {
+                entry.latest_activity_epoch = session.last_activity_epoch;
+            }
+            match session.status {
+                SessionStatus::Replied => {
+                    entry.has_replied = true;
+                    entry.aggregate_status = SessionStatus::Replied;
+                }
+                SessionStatus::Working => {
+                    entry.has_working = true;
+                    if entry.aggregate_status != SessionStatus::Replied {
+                        entry.aggregate_status = SessionStatus::Working;
+                    }
+                }
+                SessionStatus::Read => {}
+            }
+        }
+
+        let mut summaries: Vec<ProjectSummary> = map.into_values().collect();
+        // Sort: replied first, then working, then read; within same status by latest activity.
+        summaries.sort_by(|a, b| {
+            a.aggregate_status
+                .sort_priority()
+                .cmp(&b.aggregate_status.sort_priority())
+                .then(b.latest_activity_epoch.cmp(&a.latest_activity_epoch))
+        });
+        summaries
+    }
+
+    /// Compute visible session indices for a specific project (cwd).
+    fn project_session_indices(&self, project_cwd: &str) -> Vec<usize> {
+        self.manager
+            .sessions()
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.cwd == project_cwd)
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     /// Compute visible session indices based on current filter.
     fn visible_indices(&self) -> Vec<usize> {
         let Some(ref filter) = self.filter_input else {
@@ -558,22 +640,65 @@ impl App {
                 &mut self.history_list_state,
             );
         } else {
-            let visible = self.visible_indices();
-            render_sidebar(
-                frame,
-                sidebar_chunks[0],
-                self.manager.sessions(),
-                self.selected,
-                self.focus == Focus::Sidebar,
-                &self.theme,
-                self.sort_mode,
-                self.filter_input.as_deref(),
-                self.rename_buf
-                    .as_ref()
-                    .map(|buf| (self.selected.unwrap_or(0), buf.as_str())),
-                &visible,
-                &mut self.sidebar_list_state,
-            );
+            match &self.sidebar_view {
+                SidebarView::Projects => {
+                    let summaries = self.build_project_summaries();
+                    render_project_list(
+                        frame,
+                        sidebar_chunks[0],
+                        &summaries,
+                        self.project_selected,
+                        self.focus == Focus::Sidebar,
+                        &self.theme,
+                        &mut self.project_list_state,
+                    );
+                }
+                SidebarView::ProjectSessions(cwd) => {
+                    let visible = self.project_session_indices(cwd);
+                    let project_name = self
+                        .manager
+                        .sessions()
+                        .iter()
+                        .find(|s| s.cwd == *cwd)
+                        .map(|s| s.project_name.clone())
+                        .unwrap_or_default();
+                    let title = format!(" {} [{}] ", project_name, visible.len());
+                    render_sidebar_with_title(
+                        frame,
+                        sidebar_chunks[0],
+                        self.manager.sessions(),
+                        self.selected,
+                        self.focus == Focus::Sidebar,
+                        &self.theme,
+                        self.sort_mode,
+                        self.filter_input.as_deref(),
+                        self.rename_buf
+                            .as_ref()
+                            .map(|buf| (self.selected.unwrap_or(0), buf.as_str())),
+                        &visible,
+                        &mut self.sidebar_list_state,
+                        Some(&title),
+                    );
+                }
+                SidebarView::Sessions => {
+                    let visible = self.visible_indices();
+                    render_sidebar(
+                        frame,
+                        sidebar_chunks[0],
+                        self.manager.sessions(),
+                        self.selected,
+                        self.focus == Focus::Sidebar,
+                        &self.theme,
+                        self.sort_mode,
+                        self.filter_input.as_deref(),
+                        self.rename_buf
+                            .as_ref()
+                            .map(|buf| (self.selected.unwrap_or(0), buf.as_str())),
+                        &visible,
+                        &mut self.sidebar_list_state,
+                    );
+                }
+            }
         }
         render_summary_bar(
             frame,
@@ -629,6 +754,17 @@ impl App {
                     // History mode.
                     if self.show_history && self.focus == Focus::Sidebar {
                         self.handle_history_key(key.code, key.modifiers)?;
+                        return Ok(());
+                    }
+
+                    // Project view modes.
+                    if self.focus == Focus::Sidebar
+                        && matches!(
+                            self.sidebar_view,
+                            SidebarView::Projects | SidebarView::ProjectSessions(_)
+                        )
+                    {
+                        self.handle_project_view_key(key.code, key.modifiers)?;
                         return Ok(());
                     }
 
@@ -901,7 +1037,193 @@ impl App {
                 self.history_entries = crate::session::state::load_history();
                 self.history_selected = 0;
             }
+            KeyCode::Char('p') => {
+                // Toggle project view.
+                self.sidebar_view = SidebarView::Projects;
+                self.project_selected = 0;
+            }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Handle key events in project list and project-sessions views.
+    fn handle_project_view_key(
+        &mut self,
+        code: KeyCode,
+        modifiers: KeyModifiers,
+    ) -> Result<()> {
+        match &self.sidebar_view {
+            SidebarView::Projects => {
+                match code {
+                    KeyCode::Char('q') => {
+                        self.detach_on_quit = true;
+                        self.should_quit = true;
+                    }
+                    KeyCode::Char('Q') => {
+                        self.detach_on_quit = false;
+                        self.should_quit = true;
+                    }
+                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.detach_on_quit = true;
+                        self.should_quit = true;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        let count = self.build_project_summaries().len();
+                        if count > 0 {
+                            self.project_selected =
+                                (self.project_selected + 1).min(count - 1);
+                        }
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        self.project_selected = self.project_selected.saturating_sub(1);
+                    }
+                    KeyCode::Enter => {
+                        // Drill into the selected project's sessions.
+                        let summaries = self.build_project_summaries();
+                        if let Some(proj) = summaries.get(self.project_selected) {
+                            let cwd = proj.cwd.clone();
+                            let indices = self.project_session_indices(&cwd);
+                            self.sidebar_view = SidebarView::ProjectSessions(cwd);
+                            // Select the first session in this project.
+                            self.selected = indices.first().copied();
+                            self.terminal_scroll = 0;
+                        }
+                    }
+                    KeyCode::Esc | KeyCode::Char('p') => {
+                        // Return to flat session view.
+                        self.sidebar_view = SidebarView::Sessions;
+                    }
+                    KeyCode::Char('n') => {
+                        // Allow creating new sessions from project view too.
+                        let available: Vec<AgentKind> = self
+                            .registry
+                            .available()
+                            .iter()
+                            .map(|a| a.kind())
+                            .collect();
+                        self.picker =
+                            Some(ProjectPicker::new(available, self.cached_projects.clone()));
+                        self.focus = Focus::ProjectPicker;
+                    }
+                    _ => {}
+                }
+            }
+            SidebarView::ProjectSessions(cwd) => {
+                let cwd_owned = cwd.clone();
+                match code {
+                    KeyCode::Char('q') => {
+                        self.detach_on_quit = true;
+                        self.should_quit = true;
+                    }
+                    KeyCode::Char('Q') => {
+                        self.detach_on_quit = false;
+                        self.should_quit = true;
+                    }
+                    KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.detach_on_quit = true;
+                        self.should_quit = true;
+                    }
+                    KeyCode::Esc => {
+                        // Go back to project list.
+                        self.sidebar_view = SidebarView::Projects;
+                    }
+                    KeyCode::Char('p') => {
+                        // Back to flat session view.
+                        self.sidebar_view = SidebarView::Sessions;
+                    }
+                    KeyCode::Char('j') | KeyCode::Down => {
+                        let visible = self.project_session_indices(&cwd_owned);
+                        if visible.is_empty() {
+                            return Ok(());
+                        }
+                        self.selected = Some(match self.selected {
+                            Some(current) => {
+                                if let Some(pos) =
+                                    visible.iter().position(|&i| i == current)
+                                {
+                                    visible[(pos + 1).min(visible.len() - 1)]
+                                } else {
+                                    visible[0]
+                                }
+                            }
+                            None => visible[0],
+                        });
+                        self.terminal_scroll = 0;
+                    }
+                    KeyCode::Char('k') | KeyCode::Up => {
+                        let visible = self.project_session_indices(&cwd_owned);
+                        if visible.is_empty() {
+                            return Ok(());
+                        }
+                        self.selected = Some(match self.selected {
+                            Some(current) => {
+                                if let Some(pos) =
+                                    visible.iter().position(|&i| i == current)
+                                {
+                                    visible[pos.saturating_sub(1)]
+                                } else {
+                                    visible[0]
+                                }
+                            }
+                            None => visible[0],
+                        });
+                        self.terminal_scroll = 0;
+                    }
+                    KeyCode::Enter => {
+                        if self.selected.is_some() {
+                            self.mark_selected_as_read();
+                            self.focus = Focus::Terminal;
+                        }
+                    }
+                    KeyCode::Char('d') => {
+                        if let Some(idx) = self.selected {
+                            self.manager.remove(idx)?;
+                            let visible = self.project_session_indices(&cwd_owned);
+                            if visible.is_empty() {
+                                // No more sessions in this project, go back.
+                                self.selected = None;
+                                self.terminal_content.clear();
+                                self.sidebar_view = SidebarView::Projects;
+                            } else {
+                                self.selected = Some(visible[0]);
+                            }
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        // Start rename mode.
+                        if let Some(idx) = self.selected {
+                            if let Some(session) = self.manager.get(idx) {
+                                let current =
+                                    session.task_label.clone().unwrap_or_default();
+                                self.rename_buf = Some(current);
+                            }
+                        }
+                    }
+                    KeyCode::Char('n') => {
+                        let available: Vec<AgentKind> = self
+                            .registry
+                            .available()
+                            .iter()
+                            .map(|a| a.kind())
+                            .collect();
+                        self.picker =
+                            Some(ProjectPicker::new(available, self.cached_projects.clone()));
+                        self.focus = Focus::ProjectPicker;
+                    }
+                    KeyCode::Char('e') => {
+                        if let Some(idx) = self.selected {
+                            if let Some(session) = self.manager.get(idx) {
+                                self.open_editor(&session.cwd.clone())?;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SidebarView::Sessions => {
+                // Should not reach here, but handle gracefully.
+            }
         }
         Ok(())
     }

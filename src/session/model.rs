@@ -117,7 +117,7 @@ impl Session {
             agent_kind,
             task_label: None,
             last_prompt: None,
-            status: SessionStatus::Working,
+            status: SessionStatus::Read,
             created_at: now,
             last_activity: now,
             last_activity_epoch: now_epoch(),

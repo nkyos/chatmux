@@ -1,6 +1,7 @@
 use crate::config::ResolvedTheme;
+use crate::session::model::{now_epoch, SessionStatus};
 use crate::session::state::HistoryEntry;
-use crate::session::{Session, SessionStatus, SortMode};
+use crate::session::{Session, SortMode};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -8,6 +9,18 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Padding},
     Frame,
 };
+
+/// Aggregated project data for the project list view.
+#[derive(Debug, Clone)]
+pub struct ProjectSummary {
+    pub cwd: String,
+    pub project_name: String,
+    pub session_count: usize,
+    pub has_replied: bool,
+    pub has_working: bool,
+    pub aggregate_status: SessionStatus,
+    pub latest_activity_epoch: u64,
+}
 
 pub fn render_sidebar(
     frame: &mut Frame,
@@ -22,13 +35,45 @@ pub fn render_sidebar(
     visible: &[usize],
     list_state: &mut ListState,
 ) {
+    render_sidebar_with_title(
+        frame,
+        area,
+        sessions,
+        selected,
+        sidebar_focused,
+        theme,
+        sort_mode,
+        filter,
+        rename,
+        visible,
+        list_state,
+        None,
+    );
+}
+
+pub fn render_sidebar_with_title(
+    frame: &mut Frame,
+    area: Rect,
+    sessions: &[Session],
+    selected: Option<usize>,
+    sidebar_focused: bool,
+    theme: &ResolvedTheme,
+    sort_mode: SortMode,
+    filter: Option<&str>,
+    rename: Option<(usize, &str)>,
+    visible: &[usize],
+    list_state: &mut ListState,
+    title_override: Option<&str>,
+) {
     let border_color = if sidebar_focused {
         theme.border_focused
     } else {
         theme.border_unfocused
     };
 
-    let title = format!(" Sessions [{}] ", sort_mode.label());
+    let title = title_override
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| format!(" Sessions [{}] ", sort_mode.label()));
 
     let block = Block::default()
         .title(title)
@@ -250,6 +295,119 @@ pub fn render_summary_bar(
 
     let line = Line::from(spans);
     frame.render_widget(line, area);
+}
+
+fn elapsed_display_from_epoch(epoch: u64) -> String {
+    let secs = now_epoch().saturating_sub(epoch);
+    if secs < 60 {
+        "now".into()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else {
+        format!("{}h ago", secs / 3600)
+    }
+}
+
+/// Render the project list view in the sidebar.
+pub fn render_project_list(
+    frame: &mut Frame,
+    area: Rect,
+    projects: &[ProjectSummary],
+    selected: usize,
+    sidebar_focused: bool,
+    theme: &ResolvedTheme,
+    list_state: &mut ListState,
+) {
+    let border_color = if sidebar_focused {
+        theme.border_focused
+    } else {
+        theme.border_unfocused
+    };
+
+    let block = Block::default()
+        .title(format!(" Projects [{}] ", projects.len()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .padding(Padding::horizontal(1));
+
+    if projects.is_empty() {
+        let items = vec![ListItem::new(Line::from(Span::styled(
+            "  No active projects",
+            Style::default().fg(Color::DarkGray),
+        )))];
+        let list = List::new(items).block(block);
+        frame.render_stateful_widget(list, area, list_state);
+        return;
+    }
+
+    let items: Vec<ListItem> = projects
+        .iter()
+        .enumerate()
+        .map(|(i, proj)| {
+            let is_selected = i == selected;
+            let select_indicator = if is_selected { "▶ " } else { "  " };
+
+            let name_color = if is_selected {
+                theme.selected_fg
+            } else {
+                Color::White
+            };
+
+            let status_icon = proj.aggregate_status.icon();
+            let elapsed = elapsed_display_from_epoch(proj.latest_activity_epoch);
+
+            // Line 1: status icon + project name + elapsed
+            let line1 = Line::from(vec![
+                Span::raw(select_indicator.to_string()),
+                Span::raw(format!("{status_icon} ")),
+                Span::styled(
+                    proj.project_name.clone(),
+                    Style::default().add_modifier(Modifier::BOLD).fg(name_color),
+                ),
+                Span::styled(format!("  {elapsed}"), Style::default().fg(Color::DarkGray)),
+            ]);
+
+            // Line 2: session count + status badges
+            let mut badges = vec![Span::raw("    ")];
+            badges.push(Span::styled(
+                format!("{} sessions", proj.session_count),
+                Style::default().fg(Color::DarkGray),
+            ));
+            if proj.has_replied {
+                badges.push(Span::raw("  "));
+                badges.push(Span::styled(
+                    "🔴 unread",
+                    Style::default().fg(theme.status_replied),
+                ));
+            }
+            if proj.has_working {
+                badges.push(Span::raw("  "));
+                badges.push(Span::styled(
+                    "⏳ working",
+                    Style::default().fg(theme.status_working),
+                ));
+            }
+            let line2 = Line::from(badges);
+
+            // Line 3: cwd
+            let line3 = Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    truncate_path_end(&proj.cwd),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]);
+
+            let line4 = Line::from("");
+
+            ListItem::new(vec![line1, line2, line3, line4])
+        })
+        .collect();
+
+    list_state.select(Some(selected));
+
+    let list = List::new(items).block(block);
+    frame.render_stateful_widget(list, area, list_state);
 }
 
 pub fn render_history_sidebar(
