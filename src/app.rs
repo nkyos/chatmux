@@ -624,10 +624,10 @@ impl App {
             ])
             .split(frame.area());
 
-        // Sidebar: list + summary bar.
+        // Sidebar: list + hint + summary bar.
         let sidebar_chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
+            .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(1)])
             .split(chunks[0]);
 
         if self.show_history {
@@ -707,6 +707,19 @@ impl App {
             self.manager.sessions(),
             &self.theme,
         );
+
+        // Prefix key hint at the bottom of the sidebar.
+        {
+            use ratatui::text::{Line, Span};
+            use ratatui::style::{Color, Style};
+            let hint = Line::from(vec![
+                Span::styled(" C-] ", Style::default().fg(Color::Cyan)),
+                Span::styled("prefix  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("? ", Style::default().fg(Color::Cyan)),
+                Span::styled("help", Style::default().fg(Color::DarkGray)),
+            ]);
+            frame.render_widget(hint, sidebar_chunks[2]);
+        }
 
         // Right pane: project picker or terminal.
         if let Some(ref picker) = self.picker {
