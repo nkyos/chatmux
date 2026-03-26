@@ -1,3 +1,4 @@
+pub mod help;
 pub mod project_picker;
 pub mod sidebar;
 pub mod startup;

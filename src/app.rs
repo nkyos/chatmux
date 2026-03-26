@@ -9,6 +9,7 @@ use crate::tui::sidebar::{
     render_history_sidebar, render_project_list, render_sidebar, render_sidebar_with_title,
     render_summary_bar, ProjectSummary,
 };
+use crate::tui::help::{HelpContext, render_help_overlay};
 use crate::tui::terminal::{render_empty_terminal, render_terminal};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
@@ -98,6 +99,8 @@ pub struct App {
     project_selected: usize,
     /// Scroll state for project list.
     project_list_state: ListState,
+    /// Whether the help overlay is shown.
+    show_help: bool,
 }
 
 impl App {
@@ -151,6 +154,7 @@ impl App {
             sidebar_view: SidebarView::Sessions,
             project_selected: 0,
             project_list_state: ListState::default(),
+            show_help: false,
         }
     }
 
@@ -733,6 +737,27 @@ impl App {
         } else {
             render_empty_terminal(frame, chunks[1], &self.theme);
         }
+
+        // Help overlay (drawn last, on top of everything).
+        if self.show_help {
+            let ctx = self.current_help_context();
+            render_help_overlay(frame, frame.area(), ctx);
+        }
+    }
+
+    /// Determine which help context to show based on current view state.
+    fn current_help_context(&self) -> HelpContext {
+        if self.show_history {
+            return HelpContext::History;
+        }
+        if self.focus == Focus::Terminal {
+            return HelpContext::Terminal;
+        }
+        match &self.sidebar_view {
+            SidebarView::Projects => HelpContext::Projects,
+            SidebarView::ProjectSessions(_) => HelpContext::ProjectSessions,
+            SidebarView::Sessions => HelpContext::Sessions,
+        }
     }
 
     pub fn handle_event(&mut self) -> Result<()> {
@@ -742,6 +767,17 @@ impl App {
                 Event::Key(key) => {
                     if matches!(self.mode, AppMode::Startup { .. }) {
                         self.handle_startup_key(key.code)?;
+                        return Ok(());
+                    }
+
+                    // Help overlay intercepts all keys.
+                    if self.show_help {
+                        match key.code {
+                            KeyCode::Char('?') | KeyCode::Esc => {
+                                self.show_help = false;
+                            }
+                            _ => {}
+                        }
                         return Ok(());
                     }
 
@@ -1042,6 +1078,9 @@ impl App {
                 self.sidebar_view = SidebarView::Projects;
                 self.project_selected = 0;
             }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+            }
             _ => {}
         }
         Ok(())
@@ -1105,6 +1144,9 @@ impl App {
                         self.picker =
                             Some(ProjectPicker::new(available, self.cached_projects.clone()));
                         self.focus = Focus::ProjectPicker;
+                    }
+                    KeyCode::Char('?') => {
+                        self.show_help = true;
                     }
                     _ => {}
                 }
@@ -1218,6 +1260,9 @@ impl App {
                             }
                         }
                     }
+                    KeyCode::Char('?') => {
+                        self.show_help = true;
+                    }
                     _ => {}
                 }
             }
@@ -1301,6 +1346,9 @@ impl App {
                             self.history_selected.min(self.history_entries.len() - 1);
                     }
                 }
+            }
+            KeyCode::Char('?') => {
+                self.show_help = true;
             }
             _ => {}
         }
