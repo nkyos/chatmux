@@ -218,6 +218,7 @@ impl SessionManager {
                             std::time::SystemTime::UNIX_EPOCH
                                 + std::time::Duration::from_secs(epoch)
                         });
+                    session.branch = entry.branch;
                     // Restore last activity from saved epoch or JSONL file mtime.
                     let file_epoch = session
                         .jsonl_path
@@ -288,6 +289,7 @@ impl SessionManager {
                     jsonl_modified_epoch: s.jsonl_modified
                         .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs()),
+                    branch: s.branch.clone(),
                 })
                 .collect(),
             next_id: self.next_id,

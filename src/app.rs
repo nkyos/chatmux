@@ -49,8 +49,12 @@ enum SidebarView {
 /// How often to poll JSONL files for status changes.
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Time window for double-Esc detection.
-const DOUBLE_ESC_WINDOW: Duration = Duration::from_millis(200);
+/// Check if a key event is the prefix key (Ctrl+]).
+/// Legacy terminals send Ctrl+] as Ctrl+5; modern (Kitty protocol) sends Ctrl+].
+fn is_prefix_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
+    modifiers.contains(KeyModifiers::CONTROL)
+        && matches!(code, KeyCode::Char(']') | KeyCode::Char('5'))
+}
 
 pub struct App {
     config: Config,
@@ -73,8 +77,8 @@ pub struct App {
     sidebar_area: Rect,
     /// Last time we checked JSONL files for status.
     last_status_poll: Instant,
-    /// Pending Esc in terminal mode (for double-Esc detection).
-    pending_esc: Option<Instant>,
+    /// Prefix mode active (Ctrl+] was pressed, waiting for next key).
+    prefix_active: bool,
     /// Current sort mode.
     sort_mode: SortMode,
     /// Rename mode: Some(buffer) when editing a session label.
@@ -141,7 +145,7 @@ impl App {
             terminal_area: Rect::default(),
             sidebar_area: Rect::default(),
             last_status_poll: Instant::now(),
-            pending_esc: None,
+            prefix_active: false,
             sort_mode: SortMode::StatusPriority,
             rename_buf: None,
             filter_input: None,
@@ -227,16 +231,6 @@ impl App {
                 };
                 if let Ok(content) = result {
                     self.terminal_content = content;
-                }
-            }
-        }
-
-        // Flush pending Esc if the double-Esc window has passed.
-        if let Some(esc_time) = self.pending_esc {
-            if esc_time.elapsed() >= DOUBLE_ESC_WINDOW {
-                self.pending_esc = None;
-                if let Some(idx) = self.selected {
-                    let _ = self.manager.send_keys(idx, "Escape");
                 }
             }
         }
@@ -477,6 +471,9 @@ impl App {
                     session.last_prompt = detected.last_prompt;
                 }
             }
+
+            // Refresh git branch (may change during session).
+            session.refresh_branch();
         }
     }
 
@@ -720,11 +717,15 @@ impl App {
                 .and_then(|i| self.manager.get(i))
                 .map(|s| {
                     let base = s.display_label().to_string();
-                    if self.terminal_scroll > 0 {
+                    let mut label = if self.terminal_scroll > 0 {
                         format!("{base} [scroll: -{}]", self.terminal_scroll)
                     } else {
                         base
+                    };
+                    if self.prefix_active {
+                        label.push_str(" [C-] ...]");
                     }
+                    label
                 });
             render_terminal(
                 frame,
@@ -842,6 +843,17 @@ impl App {
                         Focus::ProjectPicker => self.handle_picker_key(key.code)?,
                     }
                 }
+                Event::Paste(text) => {
+                    if self.focus == Focus::Terminal {
+                        if let Some(idx) = self.selected {
+                            if let Some(session) = self.manager.get(idx) {
+                                self.manager
+                                    .tmux()
+                                    .send_key_literal(&session.name, &text)?;
+                            }
+                        }
+                    }
+                }
                 Event::Mouse(mouse) => {
                     self.handle_mouse(mouse)?;
                 }
@@ -876,44 +888,64 @@ impl App {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if !self.is_in_sidebar(x, y) {
-                    return Ok(());
-                }
-                let content_y = (y - self.sidebar_area.y - 1) as usize;
+                if self.is_in_sidebar(x, y) {
+                    let content_y = (y - self.sidebar_area.y - 1) as usize;
 
-                if self.show_history {
-                    // History items are 2 lines each; account for scroll offset.
-                    let offset = self.history_list_state.offset();
-                    let idx = self.item_index_at_y(content_y, offset, 2);
-                    if idx < self.history_entries.len() {
-                        self.history_selected = idx;
-                    }
-                } else {
-                    let offset = self.sidebar_list_state.offset();
-                    let has_filter = self.filter_input.is_some();
+                    if self.show_history {
+                        // History items are 2 lines each; account for scroll offset.
+                        let offset = self.history_list_state.offset();
+                        let idx = self.item_index_at_y(content_y, offset, 2);
+                        if idx < self.history_entries.len() {
+                            self.history_selected = idx;
+                        }
+                    } else {
+                        let offset = self.sidebar_list_state.offset();
+                        let has_filter = self.filter_input.is_some();
 
-                    // Walk items from offset, accumulating line heights.
-                    let visible = self.visible_indices();
-                    let filter_items = if has_filter { 2 } else { 0 };
-                    let total_items = filter_items + visible.len();
-                    let mut y_accum = 0usize;
+                        // Walk items from offset, accumulating line heights.
+                        let visible = self.visible_indices();
+                        let filter_items = if has_filter { 2 } else { 0 };
+                        let total_items = filter_items + visible.len();
+                        let mut y_accum = 0usize;
 
-                    for item_idx in offset..total_items {
-                        let height = if has_filter && item_idx < 2 { 1 } else { 3 };
-                        if content_y < y_accum + height {
-                            // Clicked on filter bar — ignore.
-                            if has_filter && item_idx < 2 {
+                        for item_idx in offset..total_items {
+                            let height = if has_filter && item_idx < 2 {
+                                1
+                            } else {
+                                // Session items: 3 lines base + 1 if prompt/label present.
+                                let vis_idx = if has_filter { item_idx - 2 } else { item_idx };
+                                if vis_idx < visible.len() {
+                                    let session = &self.manager.sessions()[visible[vis_idx]];
+                                    let has_prompt = session.task_label.is_some()
+                                        || session.last_prompt.is_some();
+                                    if has_prompt { 4 } else { 3 }
+                                } else {
+                                    3
+                                }
+                            };
+                            if content_y < y_accum + height {
+                                // Clicked on filter bar — ignore.
+                                if has_filter && item_idx < 2 {
+                                    return Ok(());
+                                }
+                                let vis_idx = if has_filter { item_idx - 2 } else { item_idx };
+                                if vis_idx < visible.len() {
+                                    self.selected = Some(visible[vis_idx]);
+                                    self.terminal_scroll = 0;
+                                    self.focus = Focus::Sidebar;
+                                }
                                 return Ok(());
                             }
-                            let vis_idx = if has_filter { item_idx - 2 } else { item_idx };
-                            if vis_idx < visible.len() {
-                                self.selected = Some(visible[vis_idx]);
-                                self.terminal_scroll = 0;
-                                self.focus = Focus::Sidebar;
-                            }
-                            return Ok(());
+                            y_accum += height;
                         }
-                        y_accum += height;
+                    }
+                    // Clicked anywhere in sidebar (including empty space) → focus sidebar.
+                    self.focus = Focus::Sidebar;
+                } else if self.is_in_terminal(x, y) {
+                    // Click on terminal area → focus terminal.
+                    if self.selected.is_some() {
+                        self.mark_selected_as_read();
+                        self.focus = Focus::Terminal;
                     }
                 }
             }
@@ -1359,24 +1391,35 @@ impl App {
         // Any key input in terminal resets scroll to live view.
         self.terminal_scroll = 0;
 
-        // If a non-Esc key arrives while Esc is pending, flush the pending Esc first.
-        if code != KeyCode::Esc {
-            if self.pending_esc.take().is_some() {
-                if let Some(idx) = self.selected {
-                    self.manager.send_keys(idx, "Escape")?;
+        // Prefix mode: Ctrl+] was pressed, interpret next key as a command.
+        if self.prefix_active {
+            self.prefix_active = false;
+            match code {
+                // Prefix + Esc or [ → switch to sidebar
+                KeyCode::Esc | KeyCode::Char('[') => {
+                    self.focus = Focus::Sidebar;
+                    return Ok(());
                 }
+                // Prefix + Ctrl+] → send literal Ctrl+] to tmux
+                _ if is_prefix_key(code, modifiers) => {
+                    if let Some(idx) = self.selected {
+                        self.manager.send_keys(idx, "C-]")?;
+                    }
+                    return Ok(());
+                }
+                // Prefix + ? → show help overlay
+                KeyCode::Char('?') => {
+                    self.show_help = true;
+                    return Ok(());
+                }
+                // Any other key → ignore (prefix cancelled)
+                _ => return Ok(()),
             }
         }
 
-        if code == KeyCode::Esc {
-            if self.pending_esc.is_some() {
-                // Double Esc: go to sidebar.
-                self.pending_esc = None;
-                self.focus = Focus::Sidebar;
-            } else {
-                // First Esc: wait for possible second Esc.
-                self.pending_esc = Some(Instant::now());
-            }
+        // Ctrl+] → enter prefix mode
+        if is_prefix_key(code, modifiers) {
+            self.prefix_active = true;
             return Ok(());
         }
 

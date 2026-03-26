@@ -55,7 +55,7 @@ fn shortcut_lines(ctx: HelpContext) -> Vec<(&'static str, &'static str)> {
             lines.push(("Q", "Quit (kill sessions)"));
         }
         HelpContext::Terminal => {
-            lines.push(("Esc Esc", "Back to sidebar"));
+            lines.push(("C-] Esc", "Back to sidebar"));
             lines.push(("Scroll", "Scroll history"));
             lines.push(("*", "All keys forwarded to agent"));
         }

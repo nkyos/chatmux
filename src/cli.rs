@@ -1,5 +1,5 @@
 use crate::agent::{AgentKind, AgentRegistry};
-use crate::session::model::now_epoch;
+use crate::session::model::{detect_git_branch, now_epoch};
 use crate::session::state::{self, SavedState, SessionEntry};
 use crate::tmux::TmuxClient;
 use anyhow::Result;
@@ -56,6 +56,7 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
         last_activity_epoch: Some(now_epoch()),
         status: Some("working".to_string()),
         jsonl_modified_epoch: None,
+        branch: detect_git_branch(&cwd),
     });
     state::save(&SavedState {
         sessions,

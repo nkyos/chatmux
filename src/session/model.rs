@@ -1,5 +1,5 @@
 use crate::agent::AgentKind;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 /// Return the current time as a Unix epoch (seconds).
@@ -100,6 +100,8 @@ pub struct Session {
     /// True when an external tmux client is directly attached to this session.
     /// TUI skips resizing while this is true.
     pub attached_externally: bool,
+    /// Git branch name for this session's cwd (if inside a git repo).
+    pub branch: Option<String>,
 }
 
 impl Session {
@@ -108,6 +110,7 @@ impl Session {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| cwd.clone());
+        let branch = detect_git_branch(&cwd);
 
         let now = Instant::now();
         Self {
@@ -125,6 +128,7 @@ impl Session {
             jsonl_modified: None,
             pre_existing_files: Vec::new(),
             attached_externally: false,
+            branch,
         }
     }
 
@@ -159,5 +163,31 @@ impl Session {
         self.last_activity = Instant::now()
             .checked_sub(Duration::from_secs(elapsed))
             .unwrap_or_else(Instant::now);
+    }
+
+    /// Refresh the git branch from the session's cwd.
+    pub fn refresh_branch(&mut self) {
+        self.branch = detect_git_branch(&self.cwd);
+    }
+}
+
+/// Detect the current git branch by reading `.git/HEAD`.
+/// Returns `None` if the directory is not a git repo.
+pub fn detect_git_branch(cwd: &str) -> Option<String> {
+    let mut dir = Path::new(cwd);
+    loop {
+        let head = dir.join(".git/HEAD");
+        if let Ok(content) = std::fs::read_to_string(&head) {
+            let content = content.trim();
+            if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
+                return Some(branch.to_string());
+            }
+            // Detached HEAD — return short hash.
+            if content.len() >= 8 {
+                return Some(content[..8].to_string());
+            }
+            return None;
+        }
+        dir = dir.parent()?;
     }
 }

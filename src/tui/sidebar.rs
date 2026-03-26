@@ -147,14 +147,24 @@ fn sanitize_label(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Show a path truncated from the end: "…/tools/chatmux" if too long.
-fn truncate_path_end(path: &str) -> String {
+/// Replace home directory prefix with ~ and truncate from the start if too long.
+fn truncate_path(path: &str) -> String {
     const MAX_LEN: usize = 36;
-    if path.len() <= MAX_LEN {
-        return path.to_string();
+    let display = if let Some(home) = dirs::home_dir() {
+        let home_str = home.to_string_lossy();
+        if let Some(rest) = path.strip_prefix(home_str.as_ref()) {
+            format!("~{rest}")
+        } else {
+            path.to_string()
+        }
+    } else {
+        path.to_string()
+    };
+    if display.len() <= MAX_LEN {
+        return display;
     }
-    // Find a '/' boundary within the truncation zone to cut cleanly.
-    let tail = &path[path.len() - MAX_LEN..];
+    // Keep the trailing part (more meaningful).
+    let tail = &display[display.len() - MAX_LEN..];
     if let Some(slash_pos) = tail.find('/') {
         format!("…{}", &tail[slash_pos..])
     } else {
@@ -199,11 +209,19 @@ fn session_to_list_item(
         .or(session.last_prompt.as_deref())
         .map(sanitize_label);
 
-    // Line for cwd (truncated from end)
-    let cwd_line = Line::from(vec![
+    // Line for cwd + branch
+    let mut cwd_spans = vec![
         Span::raw("    "),
-        Span::styled(truncate_path_end(&session.cwd), Style::default().fg(Color::DarkGray)),
-    ]);
+        Span::styled(truncate_path(&session.cwd), Style::default().fg(Color::DarkGray)),
+    ];
+    if let Some(ref branch) = session.branch {
+        cwd_spans.push(Span::raw("  "));
+        cwd_spans.push(Span::styled(
+            format!(" {branch}"),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    let cwd_line = Line::from(cwd_spans);
 
     let mut lines = vec![line1];
     if let Some(prompt) = prompt_text {
@@ -247,10 +265,18 @@ fn session_to_rename_item(
         ),
     ]);
 
-    let line3 = Line::from(vec![
+    let mut cwd_spans = vec![
         Span::raw("    "),
-        Span::styled(truncate_path_end(&session.cwd), Style::default().fg(Color::DarkGray)),
-    ]);
+        Span::styled(truncate_path(&session.cwd), Style::default().fg(Color::DarkGray)),
+    ];
+    if let Some(ref branch) = session.branch {
+        cwd_spans.push(Span::raw("  "));
+        cwd_spans.push(Span::styled(
+            format!(" {branch}"),
+            Style::default().fg(Color::Cyan),
+        ));
+    }
+    let line3 = Line::from(cwd_spans);
 
     let line4 = Line::from("");
 
@@ -393,7 +419,7 @@ pub fn render_project_list(
             let line3 = Line::from(vec![
                 Span::raw("    "),
                 Span::styled(
-                    truncate_path_end(&proj.cwd),
+                    truncate_path(&proj.cwd),
                     Style::default().fg(Color::DarkGray),
                 ),
             ]);

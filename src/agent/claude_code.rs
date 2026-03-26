@@ -172,8 +172,9 @@ impl Agent for ClaudeCodeAgent {
 
 /// Encode a filesystem path to Claude's project directory name.
 /// `/Users/nkyos/lab/tools/chatmux` → `-Users-nkyos-lab-tools-chatmux`
+/// Claude Code also replaces underscores with hyphens.
 fn encode_project_path(cwd: &str) -> String {
-    cwd.replace('/', "-")
+    cwd.replace('/', "-").replace('_', "-")
 }
 
 #[derive(Deserialize)]
