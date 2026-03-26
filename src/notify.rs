@@ -1,8 +1,8 @@
 use std::process::Command;
 
-/// Send a macOS notification when Claude responds.
-pub fn notify_replied(project_name: &str) {
-    let message = format!("{project_name}: Claude responded");
+/// Send a macOS notification when a session status changes.
+pub fn notify_status(project_name: &str, status: &str, sound: &str) {
+    let message = format!("{project_name}: {status}");
 
     // Prefer terminal-notifier for better Notification Center integration.
     let result = Command::new("terminal-notifier")
@@ -12,7 +12,7 @@ pub fn notify_replied(project_name: &str) {
             "-message",
             &message,
             "-sound",
-            "default",
+            sound,
             "-group",
             &format!("chatmux-{project_name}"),
         ])
@@ -24,7 +24,7 @@ pub fn notify_replied(project_name: &str) {
 
     // Fallback to osascript.
     let script = format!(
-        r#"display notification "{message}" with title "chatmux" sound name "default""#
+        r#"display notification "{message}" with title "chatmux" sound name "{sound}""#
     );
     let _ = Command::new("osascript")
         .args(["-e", &script])

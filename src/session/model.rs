@@ -1,12 +1,20 @@
+use crate::agent::AgentKind;
 use std::path::PathBuf;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
+
+/// Return the current time as a Unix epoch (seconds).
+pub fn now_epoch() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionStatus {
     Working,
     Replied,
-    Waiting,
-    Idle,
+    Read,
 }
 
 impl SessionStatus {
@@ -14,17 +22,48 @@ impl SessionStatus {
         match self {
             Self::Working => "⏳",
             Self::Replied => "🔴",
-            Self::Waiting => "⚠️",
-            Self::Idle => "💤",
+            Self::Read => "✅",
         }
     }
 
     pub fn sort_priority(&self) -> u8 {
         match self {
-            Self::Waiting => 0,
-            Self::Replied => 1,
-            Self::Working => 2,
-            Self::Idle => 3,
+            Self::Replied => 0,
+            Self::Working => 1,
+            Self::Read => 2,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Working => "working",
+            Self::Replied => "replied",
+            Self::Read => "read",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortMode {
+    StatusPriority,
+    LastActivity,
+    Manual,
+}
+
+impl SortMode {
+    pub fn label(&self) -> &str {
+        match self {
+            Self::StatusPriority => "status",
+            Self::LastActivity => "activity",
+            Self::Manual => "manual",
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        match self {
+            Self::StatusPriority => Self::LastActivity,
+            Self::LastActivity => Self::Manual,
+            Self::Manual => Self::StatusPriority,
         }
     }
 }
@@ -37,22 +76,34 @@ pub struct Session {
     pub cwd: String,
     /// Display-friendly project name (last component of cwd).
     pub project_name: String,
+    /// Which AI agent this session runs.
+    pub agent_kind: AgentKind,
     /// User-defined task label (e.g. "fix auth bug").
     pub task_label: Option<String>,
+    /// Last user prompt extracted from the JSONL file.
+    pub last_prompt: Option<String>,
     /// Current status.
     pub status: SessionStatus,
     /// When this session was created.
     pub created_at: Instant,
-    /// When the last activity was detected.
+    /// When the last activity was detected (monotonic, for sorting within a run).
     pub last_activity: Instant,
+    /// When the last activity was detected (wall-clock epoch, for display and persistence).
+    pub last_activity_epoch: u64,
     /// Cached path to the active JSONL file (resolved lazily).
     pub jsonl_path: Option<PathBuf>,
     /// Last known modification time of the JSONL file.
     pub jsonl_modified: Option<SystemTime>,
+    /// Session files that existed before this session was created.
+    /// Used to exclude them when resolving this session's JSONL file.
+    pub pre_existing_files: Vec<PathBuf>,
+    /// True when an external tmux client is directly attached to this session.
+    /// TUI skips resizing while this is true.
+    pub attached_externally: bool,
 }
 
 impl Session {
-    pub fn new(name: String, cwd: String) -> Self {
+    pub fn new(name: String, cwd: String, agent_kind: AgentKind) -> Self {
         let project_name = std::path::Path::new(&cwd)
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -63,23 +114,29 @@ impl Session {
             name,
             cwd,
             project_name,
+            agent_kind,
             task_label: None,
+            last_prompt: None,
             status: SessionStatus::Working,
             created_at: now,
             last_activity: now,
+            last_activity_epoch: now_epoch(),
             jsonl_path: None,
             jsonl_modified: None,
+            pre_existing_files: Vec::new(),
+            attached_externally: false,
         }
     }
 
     pub fn display_label(&self) -> &str {
         self.task_label
             .as_deref()
+            .or(self.last_prompt.as_deref())
             .unwrap_or(&self.project_name)
     }
 
     pub fn elapsed_display(&self) -> String {
-        let secs = self.last_activity.elapsed().as_secs();
+        let secs = now_epoch().saturating_sub(self.last_activity_epoch);
         if secs < 60 {
             "now".into()
         } else if secs < 3600 {
@@ -87,5 +144,20 @@ impl Session {
         } else {
             format!("{}h ago", secs / 3600)
         }
+    }
+
+    /// Update both the monotonic and wall-clock activity timestamps.
+    pub fn touch_activity(&mut self) {
+        self.last_activity = Instant::now();
+        self.last_activity_epoch = now_epoch();
+    }
+
+    /// Set activity timestamps from a saved epoch value (for restore).
+    pub fn set_activity_from_epoch(&mut self, epoch: u64) {
+        self.last_activity_epoch = epoch;
+        let elapsed = now_epoch().saturating_sub(epoch);
+        self.last_activity = Instant::now()
+            .checked_sub(Duration::from_secs(elapsed))
+            .unwrap_or_else(Instant::now);
     }
 }

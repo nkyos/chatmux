@@ -1,5 +1,6 @@
 use super::model::{Session, SessionStatus};
 use super::state::{self, SavedState, SessionEntry};
+use crate::agent::{Agent, AgentKind};
 use crate::tmux::TmuxClient;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -23,15 +24,27 @@ impl SessionManager {
         &self.tmux
     }
 
-    /// Create a new session, launching claude in the given directory.
-    pub fn create(&mut self, cwd: &str, width: u16, height: u16) -> Result<usize> {
+    /// Create a new session, launching the given agent in the given directory.
+    pub fn create(
+        &mut self,
+        cwd: &str,
+        agent: &dyn Agent,
+        width: u16,
+        height: u16,
+    ) -> Result<usize> {
+        // Snapshot existing session files BEFORE launching the agent.
+        // This lets us later identify which new file belongs to this session.
+        let pre_existing = agent.list_session_files(cwd);
+
         let id = self.next_id;
         self.next_id += 1;
         let name = format!("s{id}");
 
-        self.tmux.new_session(&name, cwd, width, height)?;
+        self.tmux
+            .new_session(&name, cwd, agent.command(), &agent.args(), width, height)?;
 
-        let session = Session::new(name, cwd.to_string());
+        let mut session = Session::new(name, cwd.to_string(), agent.kind());
+        session.pre_existing_files = pre_existing;
         self.sessions.push(session);
         Ok(self.sessions.len() - 1)
     }
@@ -42,6 +55,19 @@ impl SessionManager {
             anyhow::bail!("Session index out of range");
         }
         let session = self.sessions.remove(index);
+        // Record in history before killing.
+        let entry = state::HistoryEntry {
+            cwd: session.cwd.clone(),
+            project_name: session.project_name.clone(),
+            agent_kind: session.agent_kind,
+            task_label: session.task_label.clone(),
+            last_prompt: session.last_prompt.clone(),
+            ended_at: std::time::SystemTime::now()
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
+        state::append_history(&entry);
         // Best-effort kill; ignore errors if already dead.
         let _ = self.tmux.kill_session(&session.name);
         Ok(())
@@ -67,6 +93,13 @@ impl SessionManager {
         self.sessions.is_empty()
     }
 
+    /// Ensure next_id is at least `min`, preventing ID collisions with externally created sessions.
+    pub fn ensure_next_id(&mut self, min: usize) {
+        if self.next_id < min {
+            self.next_id = min;
+        }
+    }
+
     /// Sort sessions by smart ordering (waiting > replied > working > idle).
     pub fn sort_by_priority(&mut self) -> Vec<usize> {
         let mut indices: Vec<usize> = (0..self.sessions.len()).collect();
@@ -85,6 +118,19 @@ impl SessionManager {
         indices
     }
 
+    /// Sort sessions by last activity (most recent first).
+    pub fn sort_by_activity(&mut self) -> Vec<usize> {
+        let mut indices: Vec<usize> = (0..self.sessions.len()).collect();
+        indices.sort_by(|&a, &b| {
+            self.sessions[b]
+                .last_activity
+                .cmp(&self.sessions[a].last_activity)
+        });
+        let reordered: Vec<Session> = indices.iter().map(|&i| self.sessions[i].clone()).collect();
+        self.sessions = reordered;
+        indices
+    }
+
     /// Capture the terminal output of a session.
     pub fn capture(&self, index: usize) -> Result<String> {
         let session = self
@@ -92,6 +138,29 @@ impl SessionManager {
             .get(index)
             .ok_or_else(|| anyhow::anyhow!("Session index out of range"))?;
         self.tmux.capture_pane(&session.name)
+    }
+
+    /// Capture terminal output scrolled back by `scroll_back` lines.
+    pub fn capture_scroll(
+        &self,
+        index: usize,
+        scroll_back: u16,
+        pane_height: u16,
+    ) -> Result<String> {
+        let session = self
+            .sessions
+            .get(index)
+            .ok_or_else(|| anyhow::anyhow!("Session index out of range"))?;
+        self.tmux
+            .capture_pane_scroll(&session.name, scroll_back, pane_height)
+    }
+
+    /// Get the scrollback history size for a session.
+    pub fn history_size(&self, index: usize) -> u16 {
+        self.sessions
+            .get(index)
+            .map(|s| self.tmux.history_size(&s.name))
+            .unwrap_or(0)
     }
 
     /// Send keys to a session.
@@ -116,7 +185,7 @@ impl SessionManager {
     pub fn set_status(&mut self, index: usize, status: SessionStatus) {
         if let Some(session) = self.sessions.get_mut(index) {
             session.status = status;
-            session.last_activity = std::time::Instant::now();
+            session.touch_activity();
         }
     }
 
@@ -129,22 +198,58 @@ impl SessionManager {
             // Restore from saved state, but only if tmux session is alive.
             for entry in saved.sessions {
                 if live.contains(&entry.name) {
-                    let mut session = Session::new(entry.name, entry.cwd);
+                    let mut session = Session::new(entry.name, entry.cwd, entry.agent_kind);
                     session.project_name = entry.project_name;
                     session.task_label = entry.task_label;
-                    session.status = SessionStatus::Idle;
+                    session.last_prompt = entry.last_prompt;
+                    // Restore saved status (defaults to Working if missing).
+                    session.status = match entry.status.as_deref() {
+                        Some("replied") => SessionStatus::Replied,
+                        Some("read") => SessionStatus::Read,
+                        _ => SessionStatus::Working,
+                    };
+                    session.jsonl_path = entry
+                        .session_file
+                        .as_ref()
+                        .map(|s| std::path::PathBuf::from(s));
+                    // Restore JSONL mtime so the poll skips unchanged files.
+                    session.jsonl_modified = entry.jsonl_modified_epoch
+                        .map(|epoch| {
+                            std::time::SystemTime::UNIX_EPOCH
+                                + std::time::Duration::from_secs(epoch)
+                        });
+                    // Restore last activity from saved epoch or JSONL file mtime.
+                    let file_epoch = session
+                        .jsonl_path
+                        .as_ref()
+                        .and_then(|p| p.metadata().ok())
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
+                    let saved_epoch = entry.last_activity_epoch;
+                    // Use whichever is more recent: saved epoch or file mtime.
+                    let epoch = match (saved_epoch, file_epoch) {
+                        (Some(s), Some(f)) => s.max(f),
+                        (Some(s), None) => s,
+                        (None, Some(f)) => f,
+                        (None, None) => 0,
+                    };
+                    if epoch > 0 {
+                        session.set_activity_from_epoch(epoch);
+                    }
                     self.sessions.push(session);
                 }
             }
             self.next_id = saved.next_id;
         } else {
             // No state file — reconstruct from live tmux sessions.
+            // Without saved state, we default to ClaudeCode.
             for name in &live {
                 let cwd = self
                     .tmux
                     .get_pane_cwd(name)
                     .unwrap_or_else(|| "/".to_string());
-                let session = Session::new(name.clone(), cwd);
+                let session = Session::new(name.clone(), cwd, AgentKind::default());
                 self.sessions.push(session);
             }
         }
@@ -171,7 +276,18 @@ impl SessionManager {
                     name: s.name.clone(),
                     cwd: s.cwd.clone(),
                     project_name: s.project_name.clone(),
+                    agent_kind: s.agent_kind,
                     task_label: s.task_label.clone(),
+                    last_prompt: s.last_prompt.clone(),
+                    session_file: s
+                        .jsonl_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().into_owned()),
+                    last_activity_epoch: Some(s.last_activity_epoch),
+                    status: Some(s.status.name().to_string()),
+                    jsonl_modified_epoch: s.jsonl_modified
+                        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs()),
                 })
                 .collect(),
             next_id: self.next_id,
@@ -193,6 +309,22 @@ impl SessionManager {
 
     /// Kill all managed tmux sessions and remove state file. Call on full shutdown.
     pub fn cleanup(&mut self) {
+        // Record all sessions in history before killing.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        for session in &self.sessions {
+            let entry = state::HistoryEntry {
+                cwd: session.cwd.clone(),
+                project_name: session.project_name.clone(),
+                agent_kind: session.agent_kind,
+                task_label: session.task_label.clone(),
+                last_prompt: session.last_prompt.clone(),
+                ended_at: now,
+            };
+            state::append_history(&entry);
+        }
         self.kill_all_chatmux_sessions();
         self.sessions.clear();
         state::remove();

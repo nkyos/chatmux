@@ -1,6 +1,7 @@
+mod agent;
 mod app;
+mod cli;
 mod config;
-mod jsonl;
 mod notify;
 mod projects;
 mod session;
@@ -17,6 +18,24 @@ use crossterm::{
 use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "claude" => return cli::run_attach(agent::AgentKind::ClaudeCode, &args[2..]),
+            "codex" => return cli::run_attach(agent::AgentKind::Codex, &args[2..]),
+            other => {
+                eprintln!("Unknown subcommand: {other}");
+                eprintln!("Usage: chatmux [claude|codex] [args...]");
+                std::process::exit(1);
+            }
+        }
+    }
+
+    run_tui()
+}
+
+fn run_tui() -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;

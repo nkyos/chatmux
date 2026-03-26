@@ -10,17 +10,30 @@ impl TmuxClient {
         Self
     }
 
-    /// Create a new tmux session running `claude` in the given directory.
+    /// Create a new tmux session running the given command in the given directory.
     pub fn new_session(
         &self,
         session_name: &str,
         cwd: &str,
+        command: &str,
+        args: &[String],
         width: u16,
         height: u16,
     ) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
+
+        // Prefix with locale env vars so the spawned process inherits them
+        // regardless of the tmux server's environment.
+        let env_prefix = Self::locale_env_prefix();
+        let shell_cmd = if args.is_empty() {
+            format!("{env_prefix}{command}")
+        } else {
+            format!("{env_prefix}{command} {}", args.join(" "))
+        };
+
         let status = Command::new("tmux")
             .args([
+                "-u", // Force UTF-8 mode
                 "new-session",
                 "-d",
                 "-s",
@@ -31,7 +44,7 @@ impl TmuxClient {
                 &height.to_string(),
                 "-c",
                 cwd,
-                "claude",
+                &shell_cmd,
             ])
             .status()
             .context("Failed to run tmux")?;
@@ -39,7 +52,45 @@ impl TmuxClient {
         if !status.success() {
             anyhow::bail!("tmux new-session failed with {status}");
         }
+
+        // Apply sensible defaults for the session.
+        self.configure_session(&full_name);
+
         Ok(())
+    }
+
+    /// Build an env-var prefix string like "LANG=ja_JP.UTF-8 TERM=xterm-256color "
+    /// from the current process environment, so the command inside tmux
+    /// inherits the caller's locale and terminal settings.
+    pub fn locale_env_prefix() -> String {
+        let mut parts = Vec::new();
+        for var in &["LANG", "LC_ALL", "LC_CTYPE", "TERM"] {
+            if let Ok(val) = std::env::var(var) {
+                if !val.is_empty() {
+                    parts.push(format!("{var}={val}"));
+                }
+            }
+        }
+        if parts.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", parts.join(" "))
+        }
+    }
+
+    /// Apply sensible tmux options to a session (mouse, scrollback).
+    fn configure_session(&self, full_name: &str) {
+        let options: &[(&str, &str)] = &[
+            ("mouse", "on"),
+            ("history-limit", "50000"),
+        ];
+        for (key, value) in options {
+            let _ = Command::new("tmux")
+                .args(["set-option", "-t", full_name, key, value])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
     }
 
     /// Capture the current pane content with ANSI escape sequences.
@@ -47,7 +98,43 @@ impl TmuxClient {
     pub fn capture_pane(&self, session_name: &str) -> Result<String> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
         let output = Command::new("tmux")
-            .args(["capture-pane", "-e", "-p", "-J", "-t", &full_name])
+            .args(["capture-pane", "-e", "-p", "-t", &full_name])
+            .output()
+            .context("Failed to run tmux capture-pane")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux capture-pane failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Capture pane content shifted up by `scroll_back` lines into scrollback history.
+    /// Returns a window of `pane_height` lines starting from `scroll_back` lines above
+    /// the current visible region.
+    pub fn capture_pane_scroll(
+        &self,
+        session_name: &str,
+        scroll_back: u16,
+        pane_height: u16,
+    ) -> Result<String> {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let start = -(scroll_back as i32);
+        let end = start + (pane_height as i32) - 1;
+        let output = Command::new("tmux")
+            .args([
+                "capture-pane",
+                "-e",
+                "-p",
+                "-S",
+                &start.to_string(),
+                "-E",
+                &end.to_string(),
+                "-t",
+                &full_name,
+            ])
             .output()
             .context("Failed to run tmux capture-pane")?;
 
@@ -63,13 +150,17 @@ impl TmuxClient {
     /// Send keys to a tmux session.
     pub fn send_keys(&self, session_name: &str, keys: &str) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
-        let status = Command::new("tmux")
+        let output = Command::new("tmux")
             .args(["send-keys", "-t", &full_name, keys])
-            .status()
+            .stderr(std::process::Stdio::piped())
+            .output()
             .context("Failed to run tmux send-keys")?;
 
-        if !status.success() {
-            anyhow::bail!("tmux send-keys failed with {status}");
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux send-keys failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         Ok(())
     }
@@ -77,13 +168,17 @@ impl TmuxClient {
     /// Send a literal key (e.g. "Enter", "Escape", "C-c") to a tmux session.
     pub fn send_key_literal(&self, session_name: &str, key: &str) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
-        let status = Command::new("tmux")
+        let output = Command::new("tmux")
             .args(["send-keys", "-t", &full_name, "-l", key])
-            .status()
+            .stderr(std::process::Stdio::piped())
+            .output()
             .context("Failed to run tmux send-keys -l")?;
 
-        if !status.success() {
-            anyhow::bail!("tmux send-keys -l failed with {status}");
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux send-keys -l failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         Ok(())
     }
@@ -139,19 +234,107 @@ impl TmuxClient {
         }
     }
 
+    /// Get the number of lines in the scrollback history for a session's pane.
+    pub fn history_size(&self, session_name: &str) -> u16 {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let output = Command::new("tmux")
+            .args([
+                "display-message",
+                "-t",
+                &full_name,
+                "-p",
+                "#{history_size}",
+            ])
+            .output()
+            .ok();
+        output
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .trim()
+                    .parse::<u16>()
+                    .ok()
+            })
+            .unwrap_or(0)
+    }
+
     /// Check if a tmux session is still alive.
     pub fn has_session(&self, session_name: &str) -> bool {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
         Command::new("tmux")
             .args(["has-session", "-t", &full_name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .is_ok_and(|s| s.success())
+    }
+
+    /// Check if a tmux session has any attached clients.
+    /// Returns true if someone is directly attached (e.g. via `chatmux claude`).
+    pub fn has_attached_client(&self, session_name: &str) -> bool {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let output = Command::new("tmux")
+            .args(["list-clients", "-t", &full_name, "-F", "#{client_name}"])
+            .output()
+            .ok();
+        output
+            .filter(|o| o.status.success())
+            .is_some_and(|o| !o.stdout.is_empty())
+    }
+
+    /// Get the original start command of a tmux session's pane.
+    /// This is the full command string passed to `new-session`, which
+    /// stays constant even when a child process is in the foreground.
+    pub fn get_pane_start_command(&self, session_name: &str) -> Option<String> {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let output = Command::new("tmux")
+            .args(["display-message", "-t", &full_name, "-p", "#{pane_start_command}"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if cmd.is_empty() { None } else { Some(cmd) }
+        } else {
+            None
+        }
+    }
+
+    /// Get the current command running in a tmux session's pane.
+    pub fn get_pane_command(&self, session_name: &str) -> Option<String> {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let output = Command::new("tmux")
+            .args(["display-message", "-t", &full_name, "-p", "#{pane_current_command}"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            let cmd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if cmd.is_empty() { None } else { Some(cmd) }
+        } else {
+            None
+        }
+    }
+
+    /// Get the creation time (Unix epoch) of a tmux session.
+    pub fn get_session_created(&self, session_name: &str) -> Option<u64> {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let output = Command::new("tmux")
+            .args(["display-message", "-t", &full_name, "-p", "#{session_created}"])
+            .output()
+            .ok()?;
+        if output.status.success() {
+            String::from_utf8_lossy(&output.stdout)
+                .trim()
+                .parse::<u64>()
+                .ok()
+        } else {
+            None
+        }
     }
 
     /// Resize the tmux pane to match the terminal view area.
     pub fn resize_pane(&self, session_name: &str, width: u16, height: u16) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
-        let status = Command::new("tmux")
+        let output = Command::new("tmux")
             .args([
                 "resize-window",
                 "-t",
@@ -161,11 +344,15 @@ impl TmuxClient {
                 "-y",
                 &height.to_string(),
             ])
-            .status()
+            .stderr(std::process::Stdio::piped())
+            .output()
             .context("Failed to run tmux resize-window")?;
 
-        if !status.success() {
-            anyhow::bail!("tmux resize-window failed with {status}");
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux resize-window failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
         Ok(())
     }

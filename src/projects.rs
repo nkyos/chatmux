@@ -68,6 +68,82 @@ fn decode_project_path(encoded: &str) -> Option<String> {
     Some(path)
 }
 
+/// Directories to skip during recursive search (large or generated).
+const SKIP_DIRS: &[&str] = &[
+    "node_modules",
+    "target",
+    "build",
+    "dist",
+    "__pycache__",
+    "vendor",
+    "venv",
+    "Pods",
+    "DerivedData",
+    "Library",
+];
+
+/// Recursively search for directories whose name matches the filter.
+/// Returns relative paths from `dir`, sorted alphabetically.
+pub fn find_dirs_recursive(dir: &str, filter: &str, max_depth: usize, max_results: usize) -> Vec<String> {
+    let root = Path::new(dir);
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let lower_filter = filter.to_lowercase();
+    let mut results = Vec::new();
+    find_dirs_inner(root, "", &lower_filter, max_depth, max_results, &mut results);
+    results
+}
+
+fn find_dirs_inner(
+    base: &Path,
+    relative: &str,
+    filter: &str,
+    depth: usize,
+    max_results: usize,
+    results: &mut Vec<String>,
+) {
+    if depth == 0 || results.len() >= max_results {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+
+    let mut dirs: Vec<(String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || SKIP_DIRS.contains(&name.as_str()) {
+            continue;
+        }
+        dirs.push((name, entry.path()));
+    }
+    dirs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (name, full_path) in dirs {
+        if results.len() >= max_results {
+            return;
+        }
+
+        let rel_path = if relative.is_empty() {
+            name.clone()
+        } else {
+            format!("{relative}/{name}")
+        };
+
+        // Match against directory name only (not full path) for cleaner results.
+        if name.to_lowercase().contains(filter) {
+            results.push(rel_path.clone());
+        }
+
+        find_dirs_inner(&full_path, &rel_path, filter, depth - 1, max_results, results);
+    }
+}
+
 /// List directories in the given path for the directory browser.
 pub fn list_dirs(dir: &str) -> Vec<String> {
     let path = Path::new(dir);

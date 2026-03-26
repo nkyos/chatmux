@@ -1,9 +1,11 @@
-use crate::session::{Session, SessionStatus};
+use crate::config::ResolvedTheme;
+use crate::session::state::HistoryEntry;
+use crate::session::{Session, SessionStatus, SortMode};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Padding},
+    widgets::{Block, Borders, List, ListItem, ListState, Padding},
     Frame,
 };
 
@@ -13,99 +15,318 @@ pub fn render_sidebar(
     sessions: &[Session],
     selected: Option<usize>,
     sidebar_focused: bool,
+    theme: &ResolvedTheme,
+    sort_mode: SortMode,
+    filter: Option<&str>,
+    rename: Option<(usize, &str)>,
+    visible: &[usize],
+    list_state: &mut ListState,
 ) {
     let border_color = if sidebar_focused {
-        Color::Cyan
+        theme.border_focused
     } else {
-        Color::DarkGray
+        theme.border_unfocused
     };
 
+    let title = format!(" Sessions [{}] ", sort_mode.label());
+
     let block = Block::default()
-        .title(" Sessions ")
+        .title(title)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(border_color))
         .padding(Padding::horizontal(1));
 
-    if sessions.is_empty() {
+    if sessions.is_empty() && filter.is_none() {
         let items = vec![ListItem::new(Line::from(vec![
             Span::styled("  Press ", Style::default().fg(Color::DarkGray)),
-            Span::styled("n", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "n",
+                Style::default()
+                    .fg(theme.border_focused)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to create a session", Style::default().fg(Color::DarkGray)),
         ]))];
         let list = List::new(items).block(block);
-        frame.render_widget(list, area);
+        frame.render_stateful_widget(list, area, list_state);
         return;
     }
 
-    let items: Vec<ListItem> = sessions
-        .iter()
-        .enumerate()
-        .map(|(i, session)| session_to_list_item(session, Some(i) == selected))
-        .collect();
+    let mut items: Vec<ListItem> = Vec::new();
+
+    // Filter bar.
+    if let Some(filter_text) = filter {
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled("/ ", Style::default().fg(theme.border_focused)),
+            Span::styled(filter_text.to_string(), Style::default().fg(Color::White)),
+            Span::styled("▎", Style::default().fg(theme.border_focused)),
+        ])));
+        items.push(ListItem::new(Line::from("")));
+    }
+
+    for &idx in visible {
+        let session = &sessions[idx];
+        let is_selected = Some(idx) == selected;
+        let is_renaming = rename.is_some_and(|(ri, _)| ri == idx);
+
+        if is_renaming {
+            let buf = rename.unwrap().1;
+            items.push(session_to_rename_item(session, buf, theme));
+        } else {
+            items.push(session_to_list_item(session, is_selected, theme));
+        }
+    }
+
+    if visible.is_empty() && filter.is_some() {
+        items.push(ListItem::new(Line::from(Span::styled(
+            "  No matches",
+            Style::default().fg(Color::DarkGray),
+        ))));
+    }
+
+    // Calculate which list item index corresponds to the selected session.
+    let selected_item_idx = selected.and_then(|sel| {
+        visible.iter().position(|&i| i == sel).map(|pos| {
+            let offset = if filter.is_some() { 2 } else { 0 };
+            pos + offset
+        })
+    });
+    list_state.select(selected_item_idx);
 
     let list = List::new(items).block(block);
-    frame.render_widget(list, area);
+    frame.render_stateful_widget(list, area, list_state);
 }
 
-fn session_to_list_item(session: &Session, is_selected: bool) -> ListItem<'static> {
+/// Collapse newlines and trim whitespace from a label for single-line display.
+fn sanitize_label(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Show a path truncated from the end: "…/tools/chatmux" if too long.
+fn truncate_path_end(path: &str) -> String {
+    const MAX_LEN: usize = 36;
+    if path.len() <= MAX_LEN {
+        return path.to_string();
+    }
+    // Find a '/' boundary within the truncation zone to cut cleanly.
+    let tail = &path[path.len() - MAX_LEN..];
+    if let Some(slash_pos) = tail.find('/') {
+        format!("…{}", &tail[slash_pos..])
+    } else {
+        format!("…{tail}")
+    }
+}
+
+fn session_to_list_item(
+    session: &Session,
+    is_selected: bool,
+    theme: &ResolvedTheme,
+) -> ListItem<'static> {
     let select_indicator = if is_selected { "▶ " } else { "  " };
-    let icon = session.status.icon();
+    let status_icon = session.status.icon();
+    let agent_icon = session.agent_kind.icon();
     let elapsed = session.elapsed_display();
 
-    // Line 1: icon + project name + elapsed
+    let name_color = if is_selected {
+        theme.selected_fg
+    } else {
+        Color::White
+    };
+
+    let agent_color = session.agent_kind.icon_color();
+
+    // Line 1: agent icon + status icon + project name + elapsed
     let line1 = Line::from(vec![
         Span::raw(select_indicator.to_string()),
-        Span::raw(format!("{icon} ")),
+        Span::styled(agent_icon.to_string(), Style::default().fg(agent_color)),
+        Span::raw(format!(" {status_icon} ")),
         Span::styled(
             session.project_name.clone(),
-            Style::default().add_modifier(Modifier::BOLD).fg(if is_selected {
-                Color::Cyan
-            } else {
-                Color::White
-            }),
+            Style::default().add_modifier(Modifier::BOLD).fg(name_color),
         ),
         Span::styled(format!("  {elapsed}"), Style::default().fg(Color::DarkGray)),
     ]);
 
-    // Line 2: task label
-    let label = session.display_label().to_string();
-    let line2 = Line::from(vec![
+    // Line 2: task label or last prompt (if available)
+    let prompt_text = session
+        .task_label
+        .as_deref()
+        .or(session.last_prompt.as_deref())
+        .map(sanitize_label);
+
+    // Line for cwd (truncated from end)
+    let cwd_line = Line::from(vec![
         Span::raw("    "),
-        Span::styled(label, Style::default().fg(Color::Gray)),
+        Span::styled(truncate_path_end(&session.cwd), Style::default().fg(Color::DarkGray)),
     ]);
 
-    // Line 3: empty line as separator
-    let line3 = Line::from("");
+    let mut lines = vec![line1];
+    if let Some(prompt) = prompt_text {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(prompt, Style::default().fg(Color::Gray)),
+        ]));
+    }
+    lines.push(cwd_line);
+    lines.push(Line::from(""));
 
-    ListItem::new(vec![line1, line2, line3])
+    ListItem::new(lines)
+}
+
+fn session_to_rename_item(
+    session: &Session,
+    buf: &str,
+    theme: &ResolvedTheme,
+) -> ListItem<'static> {
+    let status_icon = session.status.icon();
+    let agent_icon = session.agent_kind.icon();
+    let agent_color = session.agent_kind.icon_color();
+
+    let line1 = Line::from(vec![
+        Span::raw("▶ ".to_string()),
+        Span::styled(agent_icon.to_string(), Style::default().fg(agent_color)),
+        Span::raw(format!(" {status_icon} ")),
+        Span::styled(
+            session.project_name.clone(),
+            Style::default()
+                .add_modifier(Modifier::BOLD)
+                .fg(theme.selected_fg),
+        ),
+    ]);
+
+    let line2 = Line::from(vec![
+        Span::raw("    "),
+        Span::styled(
+            format!("{buf}▎"),
+            Style::default().fg(Color::White).bg(Color::DarkGray),
+        ),
+    ]);
+
+    let line3 = Line::from(vec![
+        Span::raw("    "),
+        Span::styled(truncate_path_end(&session.cwd), Style::default().fg(Color::DarkGray)),
+    ]);
+
+    let line4 = Line::from("");
+
+    ListItem::new(vec![line1, line2, line3, line4])
 }
 
 /// Render the summary bar at the bottom of the sidebar.
-pub fn render_summary_bar(frame: &mut Frame, area: Rect, sessions: &[Session]) {
-    let mut waiting = 0u32;
+pub fn render_summary_bar(
+    frame: &mut Frame,
+    area: Rect,
+    sessions: &[Session],
+    theme: &ResolvedTheme,
+) {
     let mut replied = 0u32;
+    let mut read = 0u32;
     let mut working = 0u32;
-    let mut idle = 0u32;
 
     for s in sessions {
         match s.status {
-            SessionStatus::Waiting => waiting += 1,
             SessionStatus::Replied => replied += 1,
+            SessionStatus::Read => read += 1,
             SessionStatus::Working => working += 1,
-            SessionStatus::Idle => idle += 1,
         }
     }
 
     let spans = vec![
-        Span::styled(format!(" ⚠️{waiting}"), Style::default().fg(Color::Yellow)),
+        Span::styled(
+            format!(" 🔴{replied}"),
+            Style::default().fg(theme.status_replied),
+        ),
         Span::raw("  "),
-        Span::styled(format!("🔴{replied}"), Style::default().fg(Color::Red)),
+        Span::styled(
+            format!("⏳{working}"),
+            Style::default().fg(theme.status_working),
+        ),
         Span::raw("  "),
-        Span::styled(format!("⏳{working}"), Style::default().fg(Color::Blue)),
-        Span::raw("  "),
-        Span::styled(format!("💤{idle}"), Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("✅{read}"),
+            Style::default().fg(theme.status_read),
+        ),
     ];
 
     let line = Line::from(spans);
     frame.render_widget(line, area);
+}
+
+pub fn render_history_sidebar(
+    frame: &mut Frame,
+    area: Rect,
+    entries: &[HistoryEntry],
+    selected: usize,
+    sidebar_focused: bool,
+    theme: &ResolvedTheme,
+    list_state: &mut ListState,
+) {
+    let border_color = if sidebar_focused {
+        theme.border_focused
+    } else {
+        theme.border_unfocused
+    };
+
+    let block = Block::default()
+        .title(" History ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border_color))
+        .padding(Padding::horizontal(1));
+
+    if entries.is_empty() {
+        let items = vec![ListItem::new(Line::from(Span::styled(
+            "  No history",
+            Style::default().fg(Color::DarkGray),
+        )))];
+        let list = List::new(items).block(block);
+        frame.render_stateful_widget(list, area, list_state);
+        return;
+    }
+
+    let items: Vec<ListItem> = entries
+        .iter()
+        .enumerate()
+        .map(|(i, entry)| {
+            let is_selected = i == selected;
+            let select_indicator = if is_selected { "▶ " } else { "  " };
+
+            let name_color = if is_selected {
+                theme.selected_fg
+            } else {
+                Color::Gray
+            };
+
+            let elapsed = entry.elapsed_display();
+            let agent_icon = entry.agent_kind.icon();
+            let agent_color = entry.agent_kind.icon_color();
+
+            let line1 = Line::from(vec![
+                Span::raw(select_indicator.to_string()),
+                Span::styled(agent_icon.to_string(), Style::default().fg(agent_color)),
+                Span::raw(" "),
+                Span::styled(
+                    entry.project_name.clone(),
+                    Style::default().fg(name_color),
+                ),
+                Span::styled(format!("  {elapsed}"), Style::default().fg(Color::DarkGray)),
+            ]);
+
+            let label = entry
+                .task_label
+                .as_deref()
+                .or(entry.last_prompt.as_deref())
+                .unwrap_or(&entry.cwd);
+            let line2 = Line::from(vec![
+                Span::raw("    "),
+                Span::styled(label.to_string(), Style::default().fg(Color::DarkGray)),
+            ]);
+
+            ListItem::new(vec![line1, line2])
+        })
+        .collect();
+
+    list_state.select(Some(selected));
+
+    let list = List::new(items).block(block);
+    frame.render_stateful_widget(list, area, list_state);
 }

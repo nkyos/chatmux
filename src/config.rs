@@ -1,3 +1,4 @@
+use ratatui::style::Color;
 use serde::Deserialize;
 use std::fs;
 use std::path::PathBuf;
@@ -8,6 +9,7 @@ pub struct Config {
     pub editor: EditorConfig,
     pub notifications: NotificationConfig,
     pub display: DisplayConfig,
+    pub theme: ThemeConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -28,11 +30,19 @@ impl Default for EditorConfig {
 pub struct NotificationConfig {
     /// Enable macOS notifications. Defaults to true.
     pub enabled: bool,
+    /// Which statuses trigger notifications. Defaults to ["replied"].
+    pub statuses: Vec<String>,
+    /// Notification sound name. Defaults to "default".
+    pub sound: String,
 }
 
 impl Default for NotificationConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            statuses: vec!["replied".into()],
+            sound: "default".into(),
+        }
     }
 }
 
@@ -46,6 +56,81 @@ pub struct DisplayConfig {
 impl Default for DisplayConfig {
     fn default() -> Self {
         Self { sidebar_width: 35 }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct ThemeConfig {
+    pub border_focused: String,
+    pub border_unfocused: String,
+    pub selected_fg: String,
+    pub status_working: String,
+    pub status_replied: String,
+    pub status_read: String,
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self {
+            border_focused: "cyan".into(),
+            border_unfocused: "darkgray".into(),
+            selected_fg: "cyan".into(),
+            status_working: "blue".into(),
+            status_replied: "red".into(),
+            status_read: "green".into(),
+        }
+    }
+}
+
+/// Resolved theme with parsed Color values for efficient rendering.
+pub struct ResolvedTheme {
+    pub border_focused: Color,
+    pub border_unfocused: Color,
+    pub selected_fg: Color,
+    pub status_working: Color,
+    pub status_replied: Color,
+    pub status_read: Color,
+}
+
+impl ResolvedTheme {
+    pub fn from_config(theme: &ThemeConfig) -> Self {
+        Self {
+            border_focused: parse_color(&theme.border_focused),
+            border_unfocused: parse_color(&theme.border_unfocused),
+            selected_fg: parse_color(&theme.selected_fg),
+            status_working: parse_color(&theme.status_working),
+            status_replied: parse_color(&theme.status_replied),
+            status_read: parse_color(&theme.status_read),
+        }
+    }
+}
+
+pub fn parse_color(s: &str) -> Color {
+    match s.to_lowercase().as_str() {
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "gray" | "grey" => Color::Gray,
+        "darkgray" | "darkgrey" => Color::DarkGray,
+        "lightred" => Color::LightRed,
+        "lightgreen" => Color::LightGreen,
+        "lightyellow" => Color::LightYellow,
+        "lightblue" => Color::LightBlue,
+        "lightmagenta" => Color::LightMagenta,
+        "lightcyan" => Color::LightCyan,
+        "white" => Color::White,
+        hex if hex.starts_with('#') && hex.len() == 7 => {
+            let r = u8::from_str_radix(&hex[1..3], 16).unwrap_or(255);
+            let g = u8::from_str_radix(&hex[3..5], 16).unwrap_or(255);
+            let b = u8::from_str_radix(&hex[5..7], 16).unwrap_or(255);
+            Color::Rgb(r, g, b)
+        }
+        _ => Color::White,
     }
 }
 

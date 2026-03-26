@@ -1,9 +1,10 @@
+use crate::config::ResolvedTheme;
 use ansi_to_tui::IntoText;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
     text::Text,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
@@ -13,11 +14,12 @@ pub fn render_terminal(
     content: &str,
     session_label: Option<&str>,
     terminal_focused: bool,
+    theme: &ResolvedTheme,
 ) {
     let border_color = if terminal_focused {
-        Color::Cyan
+        theme.border_focused
     } else {
-        Color::DarkGray
+        theme.border_unfocused
     };
 
     let title = match session_label {
@@ -36,17 +38,15 @@ pub fn render_terminal(
         .into_text()
         .unwrap_or_else(|_| Text::raw(content));
 
-    let paragraph = Paragraph::new(text)
-        .block(block)
-        .wrap(Wrap { trim: false });
+    let paragraph = Paragraph::new(text).block(block);
     frame.render_widget(paragraph, area);
 }
 
-pub fn render_empty_terminal(frame: &mut Frame, area: Rect) {
+pub fn render_empty_terminal(frame: &mut Frame, area: Rect, theme: &ResolvedTheme) {
     let block = Block::default()
         .title(" Terminal ")
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(theme.border_unfocused));
 
     let text = Text::styled(
         "No session selected",
