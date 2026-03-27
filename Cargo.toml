@@ -2,6 +2,8 @@
 name = "chatmux"
 version = "0.1.0"
 edition = "2024"
+description = "TUI session manager for AI coding agents"
+license = "MIT"
 
 [dependencies]
 ratatui = "0.29"
