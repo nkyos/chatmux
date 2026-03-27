@@ -82,6 +82,8 @@ pub struct Session {
     pub task_label: Option<String>,
     /// Last user prompt extracted from the JSONL file.
     pub last_prompt: Option<String>,
+    /// Last assistant reply snippet extracted from the JSONL file.
+    pub last_reply: Option<String>,
     /// Current status.
     pub status: SessionStatus,
     /// When this session was created.
@@ -120,6 +122,7 @@ impl Session {
             agent_kind,
             task_label: None,
             last_prompt: None,
+            last_reply: None,
             status: SessionStatus::Read,
             created_at: now,
             last_activity: now,

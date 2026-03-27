@@ -49,6 +49,8 @@ pub struct DetectedStatus {
     pub status: SessionStatus,
     pub timestamp: Option<String>,
     pub last_prompt: Option<String>,
+    /// Last assistant reply text (truncated snippet for notifications).
+    pub last_reply: Option<String>,
 }
 
 /// Agent adapter trait: defines how to interact with a specific AI coding agent.

@@ -89,6 +89,7 @@ impl Agent for ClaudeCodeAgent {
         let mut last_timestamp: Option<String> = None;
         let mut last_prompt: Option<String> = None;
         let mut last_user_text: Option<String> = None;
+        let mut last_assistant_text: Option<String> = None;
 
         let mut line = String::new();
         loop {
@@ -118,6 +119,15 @@ impl Agent for ClaudeCodeAgent {
                     last_stop_reason = entry.message.as_ref().and_then(|m| m.stop_reason.clone());
                     if entry.timestamp.is_some() {
                         last_timestamp = entry.timestamp;
+                    }
+                    // Extract assistant text content for notification snippet.
+                    if let Some(ref msg) = entry.message {
+                        if let Some(ref content) = msg.content {
+                            let text = extract_assistant_text(content);
+                            if !text.is_empty() {
+                                last_assistant_text = Some(text);
+                            }
+                        }
                     }
                 }
                 "user" => {
@@ -162,6 +172,7 @@ impl Agent for ClaudeCodeAgent {
             status,
             timestamp: last_timestamp,
             last_prompt: prompt,
+            last_reply: last_assistant_text,
         })
     }
 
@@ -191,6 +202,26 @@ struct JsonlEntry {
 struct MessagePart {
     stop_reason: Option<String>,
     content: Option<serde_json::Value>,
+}
+
+/// Extract assistant text from message content, skipping tool_use entries.
+fn extract_assistant_text(content: &serde_json::Value) -> String {
+    match content {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Array(blocks) => {
+            // Collect all text blocks from the assistant message.
+            let mut texts = Vec::new();
+            for block in blocks {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                        texts.push(text.to_string());
+                    }
+                }
+            }
+            texts.join("\n")
+        }
+        _ => String::new(),
+    }
 }
 
 /// Extract user-typed text from message content, skipping tool_result entries.

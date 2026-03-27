@@ -458,12 +458,17 @@ impl App {
                             &session.project_name,
                             &format!("{} {}", session.agent_kind.label(), detected.status.name()),
                             &sound,
+                            detected.last_reply.as_deref(),
                         );
                     }
                 }
                 // Update last prompt if changed.
                 if detected.last_prompt.is_some() && detected.last_prompt != session.last_prompt {
                     session.last_prompt = detected.last_prompt;
+                }
+                // Update last reply if changed.
+                if detected.last_reply.is_some() && detected.last_reply != session.last_reply {
+                    session.last_reply = detected.last_reply;
                 }
             }
 

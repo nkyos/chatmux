@@ -196,6 +196,7 @@ fn detect_codex_status(session_file: &Path) -> Option<DetectedStatus> {
     let mut last_role: Option<String> = None;
     let mut last_timestamp: Option<String> = None;
     let mut last_user_message: Option<String> = None;
+    let mut last_assistant_text: Option<String> = None;
 
     let mut line = String::new();
     loop {
@@ -232,6 +233,14 @@ fn detect_codex_status(session_file: &Path) -> Option<DetectedStatus> {
                 if payload.role.as_deref() == Some("user") {
                     if let Some(ref text) = payload.text {
                         last_user_message = Some(text.clone());
+                    }
+                }
+                // Track assistant reply text.
+                if payload.r#type.as_deref() == Some("agent_message")
+                    || payload.role.as_deref() == Some("assistant")
+                {
+                    if let Some(ref text) = payload.text {
+                        last_assistant_text = Some(text.clone());
                     }
                 }
             }
@@ -273,6 +282,7 @@ fn detect_codex_status(session_file: &Path) -> Option<DetectedStatus> {
         status,
         timestamp: last_timestamp,
         last_prompt: last_user_message,
+        last_reply: last_assistant_text,
     })
 }
 

@@ -147,30 +147,6 @@ fn sanitize_label(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// Replace home directory prefix with ~ and truncate from the start if too long.
-fn truncate_path(path: &str) -> String {
-    const MAX_LEN: usize = 36;
-    let display = if let Some(home) = dirs::home_dir() {
-        let home_str = home.to_string_lossy();
-        if let Some(rest) = path.strip_prefix(home_str.as_ref()) {
-            format!("~{rest}")
-        } else {
-            path.to_string()
-        }
-    } else {
-        path.to_string()
-    };
-    if display.len() <= MAX_LEN {
-        return display;
-    }
-    // Keep the trailing part (more meaningful).
-    let tail = &display[display.len() - MAX_LEN..];
-    if let Some(slash_pos) = tail.find('/') {
-        format!("…{}", &tail[slash_pos..])
-    } else {
-        format!("…{tail}")
-    }
-}
 
 fn session_to_list_item(
     session: &Session,
@@ -209,20 +185,6 @@ fn session_to_list_item(
         .or(session.last_prompt.as_deref())
         .map(sanitize_label);
 
-    // Line for cwd + branch
-    let mut cwd_spans = vec![
-        Span::raw("    "),
-        Span::styled(truncate_path(&session.cwd), Style::default().fg(Color::DarkGray)),
-    ];
-    if let Some(ref branch) = session.branch {
-        cwd_spans.push(Span::raw("  "));
-        cwd_spans.push(Span::styled(
-            format!(" {branch}"),
-            Style::default().fg(Color::Cyan),
-        ));
-    }
-    let cwd_line = Line::from(cwd_spans);
-
     let mut lines = vec![line1];
     if let Some(prompt) = prompt_text {
         lines.push(Line::from(vec![
@@ -230,7 +192,27 @@ fn session_to_list_item(
             Span::styled(prompt, Style::default().fg(Color::Gray)),
         ]));
     }
-    lines.push(cwd_line);
+    if let Some(ref reply) = session.last_reply {
+        let snippet = sanitize_label(reply);
+        if !snippet.is_empty() {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(
+                    format!(">> {snippet}"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        }
+    }
+    if let Some(ref branch) = session.branch {
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                format!(" {branch}"),
+                Style::default().fg(Color::Cyan),
+            ),
+        ]));
+    }
     lines.push(Line::from(""));
 
     ListItem::new(lines)
@@ -265,18 +247,17 @@ fn session_to_rename_item(
         ),
     ]);
 
-    let mut cwd_spans = vec![
-        Span::raw("    "),
-        Span::styled(truncate_path(&session.cwd), Style::default().fg(Color::DarkGray)),
-    ];
-    if let Some(ref branch) = session.branch {
-        cwd_spans.push(Span::raw("  "));
-        cwd_spans.push(Span::styled(
-            format!(" {branch}"),
-            Style::default().fg(Color::Cyan),
-        ));
-    }
-    let line3 = Line::from(cwd_spans);
+    let line3 = if let Some(ref branch) = session.branch {
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                format!(" {branch}"),
+                Style::default().fg(Color::Cyan),
+            ),
+        ])
+    } else {
+        Line::from("")
+    };
 
     let line4 = Line::from("");
 
@@ -415,18 +396,9 @@ pub fn render_project_list(
             }
             let line2 = Line::from(badges);
 
-            // Line 3: cwd
-            let line3 = Line::from(vec![
-                Span::raw("    "),
-                Span::styled(
-                    truncate_path(&proj.cwd),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]);
+            let line3 = Line::from("");
 
-            let line4 = Line::from("");
-
-            ListItem::new(vec![line1, line2, line3, line4])
+            ListItem::new(vec![line1, line2, line3])
         })
         .collect();
 
