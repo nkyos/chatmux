@@ -18,7 +18,30 @@ use ratatui::{
     widgets::ListState,
     Frame,
 };
+use std::io::Write as _;
 use std::time::{Duration, Instant};
+
+/// Text selection in the terminal area (content coordinates relative to inner area).
+#[derive(Debug, Clone, Copy)]
+struct Selection {
+    /// Start position (row, col) — where the mouse was pressed.
+    start: (u16, u16),
+    /// Current end position (row, col) — where the mouse is now.
+    end: (u16, u16),
+}
+
+impl Selection {
+    /// Return (top, bottom) with each as (row, col), ensuring top <= bottom.
+    fn ordered(&self) -> ((u16, u16), (u16, u16)) {
+        if self.start.0 < self.end.0
+            || (self.start.0 == self.end.0 && self.start.1 <= self.end.1)
+        {
+            (self.start, self.end)
+        } else {
+            (self.end, self.start)
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Focus {
@@ -105,6 +128,8 @@ pub struct App {
     project_list_state: ListState,
     /// Whether the help overlay is shown.
     show_help: bool,
+    /// Active text selection in the terminal area.
+    selection: Option<Selection>,
 }
 
 impl App {
@@ -159,6 +184,7 @@ impl App {
             project_selected: 0,
             project_list_state: ListState::default(),
             show_help: false,
+            selection: None,
         }
     }
 
@@ -748,6 +774,40 @@ impl App {
                 self.focus == Focus::Terminal,
                 &self.theme,
             );
+
+            // Render selection highlight by reversing cell styles.
+            if let Some(ref sel) = self.selection {
+                let ((r1, c1), (r2, c2)) = sel.ordered();
+                let inner_x = chunks[1].x + 1;
+                let inner_y = chunks[1].y + 1;
+                let inner_w = chunks[1].width.saturating_sub(2);
+                let inner_h = chunks[1].height.saturating_sub(2);
+                let buf = frame.buffer_mut();
+                for row in r1..=r2 {
+                    if row >= inner_h {
+                        break;
+                    }
+                    let col_start = if row == r1 { c1 } else { 0 };
+                    let col_end = if row == r2 { c2 + 1 } else { inner_w };
+                    for col in col_start..col_end.min(inner_w) {
+                        let cell =
+                            &mut buf[(inner_x + col, inner_y + row)];
+                        // Swap fg/bg for selection highlight.
+                        let fg = cell.fg;
+                        let bg = cell.bg;
+                        cell.set_fg(if bg == ratatui::style::Color::Reset {
+                            ratatui::style::Color::Black
+                        } else {
+                            bg
+                        });
+                        cell.set_bg(if fg == ratatui::style::Color::Reset {
+                            ratatui::style::Color::White
+                        } else {
+                            fg
+                        });
+                    }
+                }
+            }
         } else {
             render_empty_terminal(frame, chunks[1], &self.theme);
         }
@@ -955,11 +1015,40 @@ impl App {
                     // Clicked anywhere in sidebar (including empty space) → focus sidebar.
                     self.focus = Focus::Sidebar;
                 } else if self.is_in_terminal(x, y) {
-                    // Click on terminal area → focus terminal.
+                    // Click on terminal area → focus terminal + start selection.
                     if self.selected.is_some() {
                         self.mark_selected_as_read();
                         self.focus = Focus::Terminal;
                     }
+                    let content_col = x.saturating_sub(self.terminal_area.x + 1);
+                    let content_row = y.saturating_sub(self.terminal_area.y + 1);
+                    self.selection = Some(Selection {
+                        start: (content_row, content_col),
+                        end: (content_row, content_col),
+                    });
+                } else {
+                    self.selection = None;
+                }
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(ref mut sel) = self.selection {
+                    // Clamp to terminal content area.
+                    let inner_x = self.terminal_area.x + 1;
+                    let inner_y = self.terminal_area.y + 1;
+                    let max_col = self.terminal_area.width.saturating_sub(3);
+                    let max_row = self.terminal_area.height.saturating_sub(3);
+                    let content_col = x.saturating_sub(inner_x).min(max_col);
+                    let content_row = y.saturating_sub(inner_y).min(max_row);
+                    sel.end = (content_row, content_col);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(sel) = self.selection {
+                    // If it was just a click (not a drag), clear selection.
+                    if sel.start == sel.end {
+                        self.selection = None;
+                    }
+                    // Selection stays active; user copies explicitly with 'y'.
                 }
             }
             MouseEventKind::ScrollDown => {
@@ -1401,7 +1490,28 @@ impl App {
     }
 
     fn handle_terminal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
-        // Any key input in terminal resets scroll to live view.
+        // When selection is active, handle copy keys before forwarding to tmux.
+        if let Some(sel) = self.selection {
+            if sel.start != sel.end {
+                let is_copy = matches!(code, KeyCode::Char('y'))
+                    || (matches!(code, KeyCode::Char('c'))
+                        && (modifiers.contains(KeyModifiers::CONTROL)
+                            || modifiers.contains(KeyModifiers::SUPER)));
+                if is_copy {
+                    self.copy_selection_to_clipboard(&sel);
+                    self.selection = None;
+                    return Ok(());
+                }
+                // Esc clears selection without copying.
+                if matches!(code, KeyCode::Esc) {
+                    self.selection = None;
+                    return Ok(());
+                }
+            }
+        }
+
+        // Any key input in terminal clears selection and resets scroll.
+        self.selection = None;
         self.terminal_scroll = 0;
 
         // Prefix mode: Ctrl+] was pressed, interpret next key as a command.
@@ -1629,6 +1739,67 @@ impl App {
             .spawn()
             .ok();
         Ok(())
+    }
+
+    /// Extract plain text lines from the terminal content (ANSI stripped).
+    fn plain_lines(&self) -> Vec<String> {
+        use ansi_to_tui::IntoText;
+        let text = self
+            .terminal_content
+            .as_bytes()
+            .into_text()
+            .unwrap_or_else(|_| ratatui::text::Text::raw(&self.terminal_content));
+        text.lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    /// Copy the selected text to the system clipboard via pbcopy.
+    fn copy_selection_to_clipboard(&self, sel: &Selection) {
+        let lines = self.plain_lines();
+        let ((r1, c1), (r2, c2)) = sel.ordered();
+        let (r1, c1, r2, c2) = (r1 as usize, c1 as usize, r2 as usize, c2 as usize);
+
+        let mut selected = String::new();
+        for row in r1..=r2 {
+            if row >= lines.len() {
+                break;
+            }
+            let line = &lines[row];
+            let chars: Vec<char> = line.chars().collect();
+            let start_col = if row == r1 { c1 } else { 0 };
+            let end_col = if row == r2 {
+                (c2 + 1).min(chars.len())
+            } else {
+                chars.len()
+            };
+            if start_col < chars.len() {
+                let slice: String = chars[start_col..end_col.min(chars.len())].iter().collect();
+                selected.push_str(slice.trim_end());
+            }
+            if row < r2 {
+                selected.push('\n');
+            }
+        }
+
+        if selected.is_empty() {
+            return;
+        }
+
+        // Use OSC 52 escape sequence to set the system clipboard.
+        // This works directly through the terminal emulator (WezTerm, iTerm2, etc.)
+        // without needing to spawn external processes in raw mode.
+        use base64::Engine;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(selected.as_bytes());
+        let osc = format!("\x1b]52;c;{}\x07", encoded);
+        let _ = std::io::Write::write_all(&mut std::io::stdout(), osc.as_bytes());
+        let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
     pub fn cleanup(&mut self) {

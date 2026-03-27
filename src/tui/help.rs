@@ -57,6 +57,8 @@ fn shortcut_lines(ctx: HelpContext) -> Vec<(&'static str, &'static str)> {
         HelpContext::Terminal => {
             lines.push(("C-] Esc", "Back to sidebar"));
             lines.push(("Scroll", "Scroll history"));
+            lines.push(("y", "Copy selection"));
+            lines.push(("Esc", "Clear selection"));
             lines.push(("*", "All keys forwarded to agent"));
         }
         HelpContext::History => {
