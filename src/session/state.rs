@@ -29,6 +29,9 @@ pub struct SessionEntry {
     /// Used to skip re-reading unchanged files on restore.
     #[serde(default)]
     pub jsonl_modified_epoch: Option<u64>,
+    /// Sub-second nanoseconds of the JSONL file modification time.
+    #[serde(default)]
+    pub jsonl_modified_nsec: Option<u32>,
     /// Git branch name for this session's cwd.
     #[serde(default)]
     pub branch: Option<String>,

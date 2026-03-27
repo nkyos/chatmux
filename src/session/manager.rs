@@ -215,8 +215,9 @@ impl SessionManager {
                     // Restore JSONL mtime so the poll skips unchanged files.
                     session.jsonl_modified = entry.jsonl_modified_epoch
                         .map(|epoch| {
+                            let nsec = entry.jsonl_modified_nsec.unwrap_or(0);
                             std::time::SystemTime::UNIX_EPOCH
-                                + std::time::Duration::from_secs(epoch)
+                                + std::time::Duration::new(epoch, nsec)
                         });
                     session.branch = entry.branch;
                     // Restore last activity from saved epoch or JSONL file mtime.
@@ -289,6 +290,9 @@ impl SessionManager {
                     jsonl_modified_epoch: s.jsonl_modified
                         .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs()),
+                    jsonl_modified_nsec: s.jsonl_modified
+                        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+                        .map(|d| d.subsec_nanos()),
                     branch: s.branch.clone(),
                 })
                 .collect(),

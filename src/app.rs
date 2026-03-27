@@ -434,16 +434,11 @@ impl App {
             };
 
             // Only re-read if the file has been modified since last check.
-            // Compare at second granularity because restored values lose
-            // sub-second precision.
+            // Compare at full SystemTime precision (APFS provides nanoseconds).
+            // After session restore the saved value has only second precision,
+            // so the first poll will always re-read — that is intentional and cheap.
             let current_modified = agent::file_modified(jsonl_path);
-            let current_secs = current_modified
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            let saved_secs = session.jsonl_modified
-                .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs());
-            if current_secs == saved_secs && saved_secs.is_some() {
+            if current_modified == session.jsonl_modified && session.jsonl_modified.is_some() {
                 continue;
             }
             session.jsonl_modified = current_modified;

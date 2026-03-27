@@ -56,6 +56,7 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
         last_activity_epoch: Some(now_epoch()),
         status: Some("working".to_string()),
         jsonl_modified_epoch: None,
+        jsonl_modified_nsec: None,
         branch: detect_git_branch(&cwd),
     });
     state::save(&SavedState {
