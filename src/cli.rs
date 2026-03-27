@@ -30,13 +30,14 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
     let mut args = agent.args();
     args.extend(extra_args.iter().cloned());
 
-    // Build shell command with locale env prefix.
-    let env_prefix = TmuxClient::locale_env_prefix();
-    let shell_cmd = if args.is_empty() {
-        format!("{env_prefix}{}", agent.command())
-    } else {
-        format!("{env_prefix}{} {}", agent.command(), args.join(" "))
-    };
+    // Build command args list: env K=V ... command [args...]
+    // Using separate arguments avoids shell interpretation (/bin/sh -c).
+    let mut cmd_args: Vec<String> = vec!["env".to_string()];
+    for (key, val) in TmuxClient::locale_env_pairs() {
+        cmd_args.push(format!("{key}={val}"));
+    }
+    cmd_args.push(agent.command().to_string());
+    cmd_args.extend(args);
 
     // Derive project name from cwd.
     let project_name = Path::new(&cwd)
@@ -52,11 +53,13 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
         agent_kind: kind,
         task_label: None,
         last_prompt: None,
+        last_reply: None,
         session_file: None,
         last_activity_epoch: Some(now_epoch()),
         status: Some("working".to_string()),
         jsonl_modified_epoch: None,
         jsonl_modified_nsec: None,
+        jsonl_len: None,
         branch: detect_git_branch(&cwd),
     });
     state::save(&SavedState {
@@ -66,19 +69,15 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
 
     // Create session + configure + attach in one tmux invocation.
     // Using non-detached mode so tmux uses the actual terminal size.
+    // Passing command as separate arguments so tmux uses direct exec
+    // instead of /bin/sh -c, avoiding shell injection.
     // Chained commands (\;) set session options after creation.
-    let err = std::process::Command::new("tmux")
-        .args([
-            "-u",
-            "new-session",
-            "-s", &full_name,
-            "-c", &cwd,
-            &shell_cmd,
-            ";",  // tmux command separator
-            "set", "mouse", "on",
-            ";",
-            "set", "history-limit", "50000",
-        ])
-        .exec();
+    let mut tmux = std::process::Command::new("tmux");
+    tmux.args(["-u", "new-session", "-s", &full_name, "-c", &cwd]);
+    for arg in &cmd_args {
+        tmux.arg(arg);
+    }
+    tmux.args([";", "set", "mouse", "on", ";", "set", "history-limit", "50000"]);
+    let err = tmux.exec();
     Err(anyhow::anyhow!("Failed to exec tmux: {err}"))
 }

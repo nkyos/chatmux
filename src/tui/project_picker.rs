@@ -137,19 +137,20 @@ impl ProjectPicker {
         match self.mode {
             PickerMode::RecentProjects => {
                 let total = self.filtered_recent_projects().len() + 1; // +1 for Browse
-                if self.selected < total - 1 {
-                    self.selected += 1;
+                if total > 0 {
+                    self.selected = (self.selected + 1) % total;
                 }
             }
             PickerMode::DirectoryBrowser => {
                 let count = self.filtered_browser_entries().len();
-                if self.browser_selected < count.saturating_sub(1) {
-                    self.browser_selected += 1;
+                if count > 0 {
+                    self.browser_selected = (self.browser_selected + 1) % count;
                 }
             }
             PickerMode::AgentSelect { .. } => {
-                if self.agent_selected < self.available_agents.len().saturating_sub(1) {
-                    self.agent_selected += 1;
+                let count = self.available_agents.len();
+                if count > 0 {
+                    self.agent_selected = (self.agent_selected + 1) % count;
                 }
             }
         }
@@ -158,13 +159,22 @@ impl ProjectPicker {
     pub fn move_up(&mut self) {
         match self.mode {
             PickerMode::RecentProjects => {
-                self.selected = self.selected.saturating_sub(1);
+                let total = self.filtered_recent_projects().len() + 1; // +1 for Browse
+                if total > 0 {
+                    self.selected = if self.selected == 0 { total - 1 } else { self.selected - 1 };
+                }
             }
             PickerMode::DirectoryBrowser => {
-                self.browser_selected = self.browser_selected.saturating_sub(1);
+                let count = self.filtered_browser_entries().len();
+                if count > 0 {
+                    self.browser_selected = if self.browser_selected == 0 { count - 1 } else { self.browser_selected - 1 };
+                }
             }
             PickerMode::AgentSelect { .. } => {
-                self.agent_selected = self.agent_selected.saturating_sub(1);
+                let count = self.available_agents.len();
+                if count > 0 {
+                    self.agent_selected = if self.agent_selected == 0 { count - 1 } else { self.agent_selected - 1 };
+                }
             }
         }
     }

@@ -61,11 +61,12 @@ pub fn notify_status(project_name: &str, status: &str, sound: &str, last_reply: 
         args.push(subtitle.clone());
     }
 
-    let result = Command::new("terminal-notifier")
+    let ok = Command::new("terminal-notifier")
         .args(&args)
-        .output();
+        .output()
+        .is_ok_and(|o| o.status.success());
 
-    if result.is_ok() {
+    if ok {
         return;
     }
 

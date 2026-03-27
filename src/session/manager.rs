@@ -202,6 +202,7 @@ impl SessionManager {
                     session.project_name = entry.project_name;
                     session.task_label = entry.task_label;
                     session.last_prompt = entry.last_prompt;
+                    session.last_reply = entry.last_reply;
                     // Restore saved status (defaults to Working if missing).
                     session.status = match entry.status.as_deref() {
                         Some("replied") => SessionStatus::Replied,
@@ -212,12 +213,17 @@ impl SessionManager {
                         .session_file
                         .as_ref()
                         .map(|s| std::path::PathBuf::from(s));
-                    // Restore JSONL mtime so the poll skips unchanged files.
-                    session.jsonl_modified = entry.jsonl_modified_epoch
+                    // Restore JSONL file stamp so the poll skips unchanged files.
+                    session.jsonl_stamp = entry.jsonl_modified_epoch
                         .map(|epoch| {
                             let nsec = entry.jsonl_modified_nsec.unwrap_or(0);
-                            std::time::SystemTime::UNIX_EPOCH
-                                + std::time::Duration::new(epoch, nsec)
+                            crate::agent::FileStamp {
+                                modified: Some(
+                                    std::time::SystemTime::UNIX_EPOCH
+                                        + std::time::Duration::new(epoch, nsec),
+                                ),
+                                len: entry.jsonl_len.unwrap_or(0),
+                            }
                         });
                     session.branch = entry.branch;
                     // Restore last activity from saved epoch or JSONL file mtime.
@@ -245,13 +251,14 @@ impl SessionManager {
             self.next_id = saved.next_id;
         } else {
             // No state file — reconstruct from live tmux sessions.
-            // Without saved state, we default to ClaudeCode.
+            // Detect agent kind from tmux pane command.
             for name in &live {
                 let cwd = self
                     .tmux
                     .get_pane_cwd(name)
                     .unwrap_or_else(|| "/".to_string());
-                let session = Session::new(name.clone(), cwd, AgentKind::default());
+                let agent_kind = self.detect_agent_from_tmux(name);
+                let session = Session::new(name.clone(), cwd, agent_kind);
                 self.sessions.push(session);
             }
         }
@@ -268,6 +275,26 @@ impl SessionManager {
         }
     }
 
+    /// Detect agent kind from tmux pane command.
+    fn detect_agent_from_tmux(&self, name: &str) -> AgentKind {
+        if let Some(cmd) = self.tmux.get_pane_command(name) {
+            match cmd.as_str() {
+                "claude" => return AgentKind::ClaudeCode,
+                "codex" => return AgentKind::Codex,
+                _ => {}
+            }
+        }
+        if let Some(start_cmd) = self.tmux.get_pane_start_command(name) {
+            if start_cmd.contains("claude") {
+                return AgentKind::ClaudeCode;
+            }
+            if start_cmd.contains("codex") {
+                return AgentKind::Codex;
+            }
+        }
+        AgentKind::default()
+    }
+
     /// Save current session state to disk.
     pub fn save_state(&self) {
         let saved = SavedState {
@@ -281,18 +308,22 @@ impl SessionManager {
                     agent_kind: s.agent_kind,
                     task_label: s.task_label.clone(),
                     last_prompt: s.last_prompt.clone(),
+                    last_reply: s.last_reply.clone(),
                     session_file: s
                         .jsonl_path
                         .as_ref()
                         .map(|p| p.to_string_lossy().into_owned()),
                     last_activity_epoch: Some(s.last_activity_epoch),
                     status: Some(s.status.name().to_string()),
-                    jsonl_modified_epoch: s.jsonl_modified
+                    jsonl_modified_epoch: s.jsonl_stamp
+                        .and_then(|st| st.modified)
                         .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
                         .map(|d| d.as_secs()),
-                    jsonl_modified_nsec: s.jsonl_modified
+                    jsonl_modified_nsec: s.jsonl_stamp
+                        .and_then(|st| st.modified)
                         .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
                         .map(|d| d.subsec_nanos()),
+                    jsonl_len: s.jsonl_stamp.map(|st| st.len),
                     branch: s.branch.clone(),
                 })
                 .collect(),

@@ -148,9 +148,21 @@ impl Config {
         toml::from_str(&content).unwrap_or_default()
     }
 
-    /// Get the editor command.
+    /// Get the editor command split into program and arguments.
+    pub fn editor_command_parts(&self) -> (String, Vec<String>) {
+        let raw = self.editor_command_raw();
+        match shell_words::split(&raw) {
+            Ok(parts) if !parts.is_empty() => {
+                let mut iter = parts.into_iter();
+                (iter.next().unwrap(), iter.collect())
+            }
+            _ => (raw, vec![]),
+        }
+    }
+
+    /// Get the raw editor command string.
     /// Priority: config > $VISUAL > $EDITOR > first found CLI (cursor, code) > "open" (Finder).
-    pub fn editor_command(&self) -> String {
+    fn editor_command_raw(&self) -> String {
         if let Some(ref cmd) = self.editor.command {
             return cmd.clone();
         }

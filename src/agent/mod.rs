@@ -127,7 +127,77 @@ fn command_exists(name: &str) -> bool {
         .is_ok_and(|s| s.success())
 }
 
-/// Get the modification time of a file.
-pub fn file_modified(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).ok()?.modified().ok()
+/// Snapshot of a file's modification time and size.
+/// Comparing both catches writes that don't change mtime (same-second flush).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStamp {
+    pub modified: Option<SystemTime>,
+    pub len: u64,
+}
+
+/// Get the modification time and size of a file.
+pub fn file_stamp(path: &Path) -> Option<FileStamp> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some(FileStamp {
+        modified: meta.modified().ok(),
+        len: meta.len(),
+    })
+}
+
+/// Read complete JSONL lines from the tail of a file.
+/// Incomplete trailing lines (no terminating newline) are discarded to avoid
+/// parsing partially-flushed records. Returns empty Vec on error.
+pub fn read_complete_jsonl_tail(path: &Path, tail_bytes: u64) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(meta) = file.metadata() else {
+        return Vec::new();
+    };
+    let file_len = meta.len();
+    let start = file_len.saturating_sub(tail_bytes);
+
+    let mut buf = Vec::new();
+
+    if start > 0 {
+        if file.seek(SeekFrom::Start(start)).is_err() {
+            return Vec::new();
+        }
+        if file.read_to_end(&mut buf).is_err() {
+            return Vec::new();
+        }
+        // Discard the first partial line.
+        if let Some(pos) = buf.iter().position(|&b| b == b'\n') {
+            buf.drain(..=pos);
+        } else {
+            // The entire tail is a single line — read the full file instead.
+            buf.clear();
+            if file.seek(SeekFrom::Start(0)).is_err() {
+                return Vec::new();
+            }
+            if file.read_to_end(&mut buf).is_err() {
+                return Vec::new();
+            }
+        }
+    } else {
+        if file.read_to_end(&mut buf).is_err() {
+            return Vec::new();
+        }
+    }
+
+    let ends_with_newline = buf.last() == Some(&b'\n');
+    let mut lines: Vec<String> = buf
+        .split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| String::from_utf8(l.to_vec()).ok())
+        .collect();
+
+    // Discard incomplete trailing line (writer hasn't flushed the newline yet).
+    if !ends_with_newline && !lines.is_empty() {
+        lines.pop();
+    }
+
+    lines
 }

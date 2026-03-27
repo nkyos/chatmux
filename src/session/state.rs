@@ -16,6 +16,8 @@ pub struct SessionEntry {
     /// Last user prompt extracted from the JSONL file.
     #[serde(default)]
     pub last_prompt: Option<String>,
+    #[serde(default)]
+    pub last_reply: Option<String>,
     /// Resolved session file path (JSONL), saved so restore preserves the mapping.
     #[serde(default)]
     pub session_file: Option<String>,
@@ -32,6 +34,9 @@ pub struct SessionEntry {
     /// Sub-second nanoseconds of the JSONL file modification time.
     #[serde(default)]
     pub jsonl_modified_nsec: Option<u32>,
+    /// JSONL file size at save time (bytes).
+    #[serde(default)]
+    pub jsonl_len: Option<u64>,
     /// Git branch name for this session's cwd.
     #[serde(default)]
     pub branch: Option<String>,
@@ -89,7 +94,9 @@ pub fn save(state: &SavedState) -> Result<()> {
         fs::create_dir_all(parent)?;
     }
     let json = serde_json::to_string_pretty(state)?;
-    fs::write(&path, json)?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, &json)?;
+    fs::rename(&tmp, &path)?;
     Ok(())
 }
 
@@ -114,10 +121,12 @@ pub fn append_history(entry: &HistoryEntry) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(
-        &path,
-        serde_json::to_string_pretty(&entries).unwrap_or_default(),
-    );
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(json) = serde_json::to_string_pretty(&entries) {
+        if fs::write(&tmp, &json).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
 }
 
 pub fn load_history() -> Vec<HistoryEntry> {
@@ -135,8 +144,10 @@ pub fn save_history(entries: &[HistoryEntry]) {
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(
-        &path,
-        serde_json::to_string_pretty(entries).unwrap_or_default(),
-    );
+    let tmp = path.with_extension("json.tmp");
+    if let Ok(json) = serde_json::to_string_pretty(entries) {
+        if fs::write(&tmp, &json).is_ok() {
+            let _ = fs::rename(&tmp, &path);
+        }
+    }
 }

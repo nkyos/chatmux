@@ -1,4 +1,4 @@
-use crate::agent::AgentKind;
+use crate::agent::{AgentKind, FileStamp};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -94,8 +94,8 @@ pub struct Session {
     pub last_activity_epoch: u64,
     /// Cached path to the active JSONL file (resolved lazily).
     pub jsonl_path: Option<PathBuf>,
-    /// Last known modification time of the JSONL file.
-    pub jsonl_modified: Option<SystemTime>,
+    /// Last known file stamp (mtime + len) of the JSONL file.
+    pub jsonl_stamp: Option<FileStamp>,
     /// Session files that existed before this session was created.
     /// Used to exclude them when resolving this session's JSONL file.
     pub pre_existing_files: Vec<PathBuf>,
@@ -128,7 +128,7 @@ impl Session {
             last_activity: now,
             last_activity_epoch: now_epoch(),
             jsonl_path: None,
-            jsonl_modified: None,
+            jsonl_stamp: None,
             pre_existing_files: Vec::new(),
             attached_externally: false,
             branch,

@@ -22,30 +22,31 @@ impl TmuxClient {
     ) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
 
-        // Prefix with locale env vars so the spawned process inherits them
-        // regardless of the tmux server's environment.
-        let env_prefix = Self::locale_env_prefix();
-        let shell_cmd = if args.is_empty() {
-            format!("{env_prefix}{command}")
-        } else {
-            format!("{env_prefix}{command} {}", args.join(" "))
-        };
+        // Pass command + args as separate arguments so tmux uses direct
+        // exec instead of /bin/sh -c, avoiding shell interpretation issues.
+        // Locale env vars are forwarded via `env K=V` prefix.
+        let mut cmd = Command::new("tmux");
+        cmd.args([
+            "-u", // Force UTF-8 mode
+            "new-session",
+            "-d",
+            "-s",
+            &full_name,
+            "-x",
+            &width.to_string(),
+            "-y",
+            &height.to_string(),
+            "-c",
+            cwd,
+            "env",
+        ]);
+        for (key, val) in Self::locale_env_pairs() {
+            cmd.arg(format!("{key}={val}"));
+        }
+        cmd.arg(command);
+        cmd.args(args);
 
-        let status = Command::new("tmux")
-            .args([
-                "-u", // Force UTF-8 mode
-                "new-session",
-                "-d",
-                "-s",
-                &full_name,
-                "-x",
-                &width.to_string(),
-                "-y",
-                &height.to_string(),
-                "-c",
-                cwd,
-                &shell_cmd,
-            ])
+        let status = cmd
             .status()
             .context("Failed to run tmux")?;
 
@@ -59,23 +60,17 @@ impl TmuxClient {
         Ok(())
     }
 
-    /// Build an env-var prefix string like "LANG=ja_JP.UTF-8 TERM=xterm-256color "
-    /// from the current process environment, so the command inside tmux
-    /// inherits the caller's locale and terminal settings.
-    pub fn locale_env_prefix() -> String {
-        let mut parts = Vec::new();
-        for var in &["LANG", "LC_ALL", "LC_CTYPE", "TERM"] {
-            if let Ok(val) = std::env::var(var) {
-                if !val.is_empty() {
-                    parts.push(format!("{var}={val}"));
-                }
-            }
-        }
-        if parts.is_empty() {
-            String::new()
-        } else {
-            format!("{} ", parts.join(" "))
-        }
+    /// Collect locale/terminal env vars as key-value pairs for safe forwarding.
+    pub fn locale_env_pairs() -> Vec<(String, String)> {
+        ["LANG", "LC_ALL", "LC_CTYPE", "TERM"]
+            .into_iter()
+            .filter_map(|k| {
+                std::env::var(k)
+                    .ok()
+                    .filter(|v| !v.is_empty())
+                    .map(|v| (k.to_string(), v))
+            })
+            .collect()
     }
 
     /// Apply sensible tmux options to a session (mouse, scrollback).

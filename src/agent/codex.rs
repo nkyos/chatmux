@@ -1,8 +1,8 @@
-use super::{Agent, AgentKind, DetectedStatus};
+use super::{Agent, AgentKind, DetectedStatus, read_complete_jsonl_tail};
 use crate::session::SessionStatus;
 use serde::Deserialize;
 use std::fs;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 
 pub struct CodexAgent;
@@ -68,7 +68,7 @@ fn list_all_sessions_for_cwd(sessions_dir: &Path, cwd: &str) -> Vec<PathBuf> {
             let mut day_dirs = list_sorted_dirs(month_dir).unwrap_or_default();
             day_dirs.reverse();
 
-            for day_dir in day_dirs.iter().take(7) {
+            for day_dir in day_dirs.iter().take(31) {
                 if let Ok(entries) = fs::read_dir(day_dir) {
                     for entry in entries.flatten() {
                         let path = entry.path();
@@ -104,7 +104,7 @@ fn find_latest_session_for_cwd(
             let mut day_dirs = list_sorted_dirs(month_dir)?;
             day_dirs.reverse();
 
-            for day_dir in day_dirs.iter().take(7) {
+            for day_dir in day_dirs.iter().take(31) {
                 if let Some(path) = find_session_in_dir(day_dir, cwd, exclude) {
                     return Some(path);
                 }
@@ -177,19 +177,7 @@ fn list_sorted_dirs(dir: &Path) -> Option<Vec<PathBuf>> {
 
 /// Detect Codex session status from the tail of a JSONL file.
 fn detect_codex_status(session_file: &Path) -> Option<DetectedStatus> {
-    let file = fs::File::open(session_file).ok()?;
-    let file_len = file.metadata().ok()?.len();
-
-    let mut reader = BufReader::new(file);
-
-    // Read the last ~16KB to find recent entries.
-    let seek_pos = file_len.saturating_sub(16384);
-    if seek_pos > 0 {
-        reader.seek(SeekFrom::Start(seek_pos)).ok()?;
-        // Skip the partial first line.
-        let mut discard = String::new();
-        reader.read_line(&mut discard).ok()?;
-    }
+    let lines = read_complete_jsonl_tail(session_file, 256 * 1024);
 
     let mut last_event_type: Option<String> = None;
     let mut last_payload_type: Option<String> = None;
@@ -197,16 +185,9 @@ fn detect_codex_status(session_file: &Path) -> Option<DetectedStatus> {
     let mut last_timestamp: Option<String> = None;
     let mut last_user_message: Option<String> = None;
     let mut last_assistant_text: Option<String> = None;
+    let mut parsed: usize = 0;
 
-    let mut line = String::new();
-    loop {
-        line.clear();
-        match reader.read_line(&mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(_) => break,
-        }
-
+    for line in &lines {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -217,6 +198,7 @@ fn detect_codex_status(session_file: &Path) -> Option<DetectedStatus> {
         };
 
         if let Some(ref t) = entry.r#type {
+            parsed += 1;
             last_event_type = Some(t.clone());
             if entry.timestamp.is_some() {
                 last_timestamp = entry.timestamp.clone();
@@ -245,6 +227,11 @@ fn detect_codex_status(session_file: &Path) -> Option<DetectedStatus> {
                 }
             }
         }
+    }
+
+    // If no entries could be parsed, return None to keep previous status.
+    if parsed == 0 {
+        return None;
     }
 
     let status = match (

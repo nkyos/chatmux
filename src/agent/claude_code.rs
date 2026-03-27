@@ -1,8 +1,7 @@
-use super::{Agent, AgentKind, DetectedStatus};
+use super::{Agent, AgentKind, DetectedStatus, read_complete_jsonl_tail};
 use crate::session::SessionStatus;
 use serde::Deserialize;
 use std::fs;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 pub struct ClaudeCodeAgent;
@@ -70,19 +69,7 @@ impl Agent for ClaudeCodeAgent {
     }
 
     fn detect_status(&self, session_file: &Path) -> Option<DetectedStatus> {
-        let file = fs::File::open(session_file).ok()?;
-        let file_len = file.metadata().ok()?.len();
-
-        let mut reader = BufReader::new(file);
-
-        // Read the last ~16KB to find recent entries.
-        let seek_pos = file_len.saturating_sub(16384);
-        if seek_pos > 0 {
-            reader.seek(SeekFrom::Start(seek_pos)).ok()?;
-            // Skip the partial first line.
-            let mut discard = String::new();
-            reader.read_line(&mut discard).ok()?;
-        }
+        let lines = read_complete_jsonl_tail(session_file, 256 * 1024);
 
         let mut last_type: Option<String> = None;
         let mut last_stop_reason: Option<String> = None;
@@ -90,16 +77,9 @@ impl Agent for ClaudeCodeAgent {
         let mut last_prompt: Option<String> = None;
         let mut last_user_text: Option<String> = None;
         let mut last_assistant_text: Option<String> = None;
+        let mut parsed: usize = 0;
 
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) => break,
-                Ok(_) => {}
-                Err(_) => break,
-            }
-
+        for line in &lines {
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -112,6 +92,8 @@ impl Agent for ClaudeCodeAgent {
             let Some(ref entry_type) = entry.r#type else {
                 continue;
             };
+
+            parsed += 1;
 
             match entry_type.as_str() {
                 "assistant" => {
@@ -154,6 +136,11 @@ impl Agent for ClaudeCodeAgent {
                 }
                 _ => {}
             }
+        }
+
+        // If no entries could be parsed, return None to keep previous status.
+        if parsed == 0 {
+            return None;
         }
 
         // Prefer the explicit last-prompt entry, fall back to last user text.
