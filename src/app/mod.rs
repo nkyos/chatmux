@@ -14,7 +14,7 @@ use crate::tui::sidebar::{
     render_summary_bar, ProjectSummary,
 };
 use crate::tui::help::{HelpContext, render_confirm_overlay, render_help_overlay};
-use crate::tui::terminal::{render_empty_terminal, render_terminal};
+use crate::tui::terminal::{TerminalScroll, render_empty_terminal, render_terminal};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
 use ratatui::{
@@ -115,6 +115,8 @@ pub struct App {
     pub(super) terminal_content: String,
     /// Terminal scroll offset: lines scrolled back from the bottom (0 = live view).
     pub(super) terminal_scroll: u16,
+    /// Cached history size captured when scrolling begins (avoids per-frame tmux queries).
+    pub(super) terminal_scroll_history: u16,
     pub(super) picker: Option<ProjectPicker>,
     /// Cached terminal area for pane sizing.
     pub(super) terminal_area: Rect,
@@ -200,6 +202,7 @@ impl App {
             detach_on_quit: false,
             terminal_content: String::new(),
             terminal_scroll: 0,
+            terminal_scroll_history: 0,
             picker: None,
             terminal_area: Rect::default(),
             sidebar_area: Rect::default(),

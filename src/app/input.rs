@@ -2,8 +2,19 @@ use super::*;
 
 impl App {
     pub fn handle_event(&mut self) -> Result<()> {
-        if event::poll(Duration::from_millis(100))? {
-            let ev = event::read()?;
+        if !event::poll(Duration::from_millis(100))? {
+            return Ok(());
+        }
+
+        // Drain all pending events to avoid lag from queued scroll events.
+        // Each event is collected first, then processed in order.
+        let mut events = Vec::new();
+        events.push(event::read()?);
+        while event::poll(Duration::from_millis(0))? {
+            events.push(event::read()?);
+        }
+
+        for ev in events {
             match ev {
                 Event::Key(key) => {
                     if matches!(self.mode, AppMode::Startup { .. }) {
@@ -373,9 +384,13 @@ impl App {
                     }
                 } else if self.is_in_terminal(x, y) {
                     if let Some(idx) = self.selected {
-                        let max = self.manager.history_size(idx);
-                        self.terminal_scroll =
-                            self.terminal_scroll.saturating_add(3).min(max);
+                        // Cache history size when scrolling begins to keep scrollbar stable.
+                        if self.terminal_scroll == 0 {
+                            self.terminal_scroll_history = self.manager.history_size(idx);
+                        }
+                        self.terminal_scroll = self.terminal_scroll
+                            .saturating_add(3)
+                            .min(self.terminal_scroll_history);
                     }
                 }
             }

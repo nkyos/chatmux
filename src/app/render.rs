@@ -125,6 +125,7 @@ impl App {
                 Some("Upgrading..."),
                 true,
                 &self.theme,
+                None,
             );
         } else if let Some(ref picker) = self.picker {
             render_project_picker(frame, chunks[1], picker);
@@ -144,6 +145,14 @@ impl App {
                     }
                     label
                 });
+            let scroll_info = if self.terminal_scroll > 0 {
+                Some(TerminalScroll {
+                    offset: self.terminal_scroll,
+                    history_size: self.terminal_scroll_history,
+                })
+            } else {
+                None
+            };
             render_terminal(
                 frame,
                 chunks[1],
@@ -151,6 +160,7 @@ impl App {
                 label.as_deref(),
                 self.focus == Focus::Terminal,
                 &self.theme,
+                scroll_info.as_ref(),
             );
 
             // Render selection highlight by reversing cell styles.
