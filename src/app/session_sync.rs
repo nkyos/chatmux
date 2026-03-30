@@ -155,7 +155,8 @@ impl App {
     }
 
     /// Check session files for each session and update their status via agent adapters.
-    pub(super) fn poll_session_statuses(&mut self) {
+    /// Returns the name of a session that just transitioned to Working (user sent a prompt).
+    pub(super) fn poll_session_statuses(&mut self) -> Option<String> {
         let notifications_enabled = self.config.notifications.enabled;
         let notify_statuses = self.config.notifications.statuses.clone();
         let sound = self.config.notifications.sound.clone();
@@ -170,6 +171,7 @@ impl App {
             .collect();
 
         let registry = &self.registry;
+        let mut became_working: Option<String> = None;
 
         for session in self.manager.sessions_mut() {
             let agent_adapter = registry.get(session.agent_kind);
@@ -192,6 +194,13 @@ impl App {
                 }
             }
 
+            // Extract agent session ID when JSONL is first resolved.
+            if session.agent_session_id.is_none() {
+                if let Some(ref path) = session.jsonl_path {
+                    session.agent_session_id = agent_adapter.extract_session_id(path);
+                }
+            }
+
             let Some(ref jsonl_path) = session.jsonl_path else {
                 continue;
             };
@@ -209,6 +218,11 @@ impl App {
                 if old_status != detected.status {
                     session.status = detected.status.clone();
                     session.touch_activity();
+
+                    // Track if this session just started working (user sent a prompt).
+                    if detected.status == SessionStatus::Working {
+                        became_working = Some(session.name.clone());
+                    }
 
                     // Send notification if this status is in the notify list.
                     if notifications_enabled
@@ -235,14 +249,18 @@ impl App {
             // Refresh git branch (may change during session).
             session.refresh_branch();
         }
+
+        became_working
     }
 
     /// Poll only sessions whose JSONL file was dirtied by the watcher.
-    pub(super) fn poll_dirty_sessions(&mut self, dirty: &HashSet<PathBuf>) {
+    /// Returns the name of a session that just transitioned to Working (user sent a prompt).
+    pub(super) fn poll_dirty_sessions(&mut self, dirty: &HashSet<PathBuf>) -> Option<String> {
         let notifications_enabled = self.config.notifications.enabled;
         let notify_statuses = self.config.notifications.statuses.clone();
         let sound = self.config.notifications.sound.clone();
         let registry = &self.registry;
+        let mut became_working: Option<String> = None;
 
         for session in self.manager.sessions_mut() {
             let Some(ref jsonl_path) = session.jsonl_path else {
@@ -263,6 +281,11 @@ impl App {
                     session.status = detected.status.clone();
                     session.touch_activity();
 
+                    // Track if this session just started working (user sent a prompt).
+                    if detected.status == SessionStatus::Working {
+                        became_working = Some(session.name.clone());
+                    }
+
                     if notifications_enabled
                         && notify_statuses.contains(&detected.status.name().to_string())
                     {
@@ -282,6 +305,8 @@ impl App {
                 }
             }
         }
+
+        became_working
     }
 
     /// Apply the current sort mode to the session list.

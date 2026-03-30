@@ -104,6 +104,8 @@ pub struct Session {
     pub attached_externally: bool,
     /// Git branch name for this session's cwd (if inside a git repo).
     pub branch: Option<String>,
+    /// Agent-side session ID (UUID) for resume support.
+    pub agent_session_id: Option<String>,
 }
 
 impl Session {
@@ -132,6 +134,7 @@ impl Session {
             pre_existing_files: Vec::new(),
             attached_externally: false,
             branch,
+            agent_session_id: None,
         }
     }
 

@@ -326,6 +326,38 @@ impl TmuxClient {
         }
     }
 
+    /// Check if the pane in a tmux session has exited (process dead, pane remains).
+    pub fn is_pane_dead(&self, session_name: &str) -> bool {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let output = Command::new("tmux")
+            .args(["display-message", "-t", &full_name, "-p", "#{pane_dead}"])
+            .output()
+            .ok();
+        output
+            .filter(|o| o.status.success())
+            .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "1")
+    }
+
+    /// Create a new tmux session with remain-on-exit (for upgrade sessions).
+    pub fn new_session_with_remain_on_exit(
+        &self,
+        session_name: &str,
+        cwd: &str,
+        command: &str,
+        args: &[String],
+        width: u16,
+        height: u16,
+    ) -> Result<()> {
+        self.new_session(session_name, cwd, command, args, width, height)?;
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let _ = Command::new("tmux")
+            .args(["set-option", "-t", &full_name, "remain-on-exit", "on"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        Ok(())
+    }
+
     /// Resize the tmux pane to match the terminal view area.
     pub fn resize_pane(&self, session_name: &str, width: u16, height: u16) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");

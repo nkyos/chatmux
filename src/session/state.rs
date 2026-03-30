@@ -40,6 +40,9 @@ pub struct SessionEntry {
     /// Git branch name for this session's cwd.
     #[serde(default)]
     pub branch: Option<String>,
+    /// Agent-side session ID for resume support.
+    #[serde(default)]
+    pub agent_session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

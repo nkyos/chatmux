@@ -52,6 +52,38 @@ impl Agent for CodexAgent {
     fn discover_projects(&self) -> Vec<String> {
         discover_codex_projects()
     }
+
+    fn extract_session_id(&self, jsonl_path: &Path) -> Option<String> {
+        let file = fs::File::open(jsonl_path).ok()?;
+        let mut reader = BufReader::new(file);
+        let mut first_line = String::new();
+        reader.read_line(&mut first_line).ok()?;
+        let entry: CodexEntry = serde_json::from_str(&first_line).ok()?;
+        if entry.r#type.as_deref() == Some("session_meta") {
+            entry.payload?.id
+        } else {
+            None
+        }
+    }
+
+    fn resume_command(&self) -> &str {
+        "codex"
+    }
+
+    fn resume_args(&self, session_id: Option<&str>) -> Vec<String> {
+        match session_id {
+            Some(id) => vec![
+                "resume".into(),
+                id.into(),
+                "--dangerously-bypass-approvals-and-sandbox".into(),
+            ],
+            None => vec![
+                "resume".into(),
+                "--last".into(),
+                "--dangerously-bypass-approvals-and-sandbox".into(),
+            ],
+        }
+    }
 }
 
 /// List all Codex session JSONL files matching the given cwd.
@@ -364,4 +396,5 @@ struct CodexPayload {
     role: Option<String>,
     cwd: Option<String>,
     text: Option<String>,
+    id: Option<String>,
 }

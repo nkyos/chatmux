@@ -22,6 +22,28 @@ impl App {
                         return Ok(());
                     }
 
+                    // Confirm dialog intercepts all keys.
+                    if self.confirm_action.is_some() {
+                        self.handle_confirm_key(key.code)?;
+                        return Ok(());
+                    }
+
+                    // Upgrading: only allow quit.
+                    if self.upgrading {
+                        match key.code {
+                            KeyCode::Char('q') => {
+                                self.detach_on_quit = true;
+                                self.should_quit = true;
+                            }
+                            KeyCode::Char('Q') => {
+                                self.detach_on_quit = false;
+                                self.should_quit = true;
+                            }
+                            _ => {}
+                        }
+                        return Ok(());
+                    }
+
                     // Rename mode intercepts all keys.
                     if self.rename_buf.is_some() {
                         self.handle_rename_key(key.code)?;
@@ -476,6 +498,12 @@ impl App {
                 self.sidebar_view = SidebarView::Projects;
                 self.project_selected = 0;
             }
+            KeyCode::Char('U') => {
+                self.confirm_action = Some(ConfirmAction::UpgradeAndRestart);
+            }
+            KeyCode::Char('R') if !self.manager.is_empty() => {
+                self.confirm_action = Some(ConfirmAction::RestartAll);
+            }
             KeyCode::Char('?') => {
                 self.show_help = true;
             }
@@ -542,6 +570,12 @@ impl App {
                         self.picker =
                             Some(ProjectPicker::new(available, self.cached_projects.clone()));
                         self.focus = Focus::ProjectPicker;
+                    }
+                    KeyCode::Char('U') => {
+                        self.confirm_action = Some(ConfirmAction::UpgradeAndRestart);
+                    }
+                    KeyCode::Char('R') if !self.manager.is_empty() => {
+                        self.confirm_action = Some(ConfirmAction::RestartAll);
                     }
                     KeyCode::Char('?') => {
                         self.show_help = true;
@@ -658,6 +692,12 @@ impl App {
                             }
                         }
                     }
+                    KeyCode::Char('U') => {
+                        self.confirm_action = Some(ConfirmAction::UpgradeAndRestart);
+                    }
+                    KeyCode::Char('R') if !self.manager.is_empty() => {
+                        self.confirm_action = Some(ConfirmAction::RestartAll);
+                    }
                     KeyCode::Char('?') => {
                         self.show_help = true;
                     }
@@ -667,6 +707,19 @@ impl App {
             SidebarView::Sessions => {
                 // Should not reach here, but handle gracefully.
             }
+        }
+        Ok(())
+    }
+
+    fn handle_confirm_key(&mut self, code: KeyCode) -> Result<()> {
+        match code {
+            KeyCode::Char('y') | KeyCode::Enter => {
+                self.execute_confirmed_action()?;
+            }
+            KeyCode::Char('n') | KeyCode::Esc => {
+                self.confirm_action = None;
+            }
+            _ => {}
         }
         Ok(())
     }

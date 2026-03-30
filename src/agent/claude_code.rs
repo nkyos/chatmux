@@ -166,6 +166,24 @@ impl Agent for ClaudeCodeAgent {
     fn discover_projects(&self) -> Vec<String> {
         crate::projects::discover_projects()
     }
+
+    fn extract_session_id(&self, jsonl_path: &Path) -> Option<String> {
+        jsonl_path.file_stem()?.to_str().map(|s| s.to_string())
+    }
+
+    fn resume_args(&self, session_id: Option<&str>) -> Vec<String> {
+        match session_id {
+            Some(id) => vec![
+                "--resume".into(),
+                id.into(),
+                "--dangerously-skip-permissions".into(),
+            ],
+            None => vec![
+                "--continue".into(),
+                "--dangerously-skip-permissions".into(),
+            ],
+        }
+    }
 }
 
 /// Encode a filesystem path to Claude's project directory name.

@@ -226,6 +226,7 @@ impl SessionManager {
                             }
                         });
                     session.branch = entry.branch;
+                    session.agent_session_id = entry.agent_session_id;
                     // Restore last activity from saved epoch or JSONL file mtime.
                     let file_epoch = session
                         .jsonl_path
@@ -325,11 +326,40 @@ impl SessionManager {
                         .map(|d| d.subsec_nanos()),
                     jsonl_len: s.jsonl_stamp.map(|st| st.len),
                     branch: s.branch.clone(),
+                    agent_session_id: s.agent_session_id.clone(),
                 })
                 .collect(),
             next_id: self.next_id,
         };
         let _ = state::save(&saved);
+    }
+
+    /// Resume a session with agent-specific resume flags.
+    pub fn create_resume(
+        &mut self,
+        cwd: &str,
+        agent: &dyn Agent,
+        session_id: Option<&str>,
+        width: u16,
+        height: u16,
+    ) -> Result<usize> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = format!("s{id}");
+
+        self.tmux.new_session(
+            &name,
+            cwd,
+            agent.resume_command(),
+            &agent.resume_args(session_id),
+            width,
+            height,
+        )?;
+
+        let mut session = Session::new(name, cwd.to_string(), agent.kind());
+        session.agent_session_id = session_id.map(|s| s.to_string());
+        self.sessions.push(session);
+        Ok(self.sessions.len() - 1)
     }
 
     /// Kill all chatmux tmux sessions (including orphaned ones not tracked by this manager).

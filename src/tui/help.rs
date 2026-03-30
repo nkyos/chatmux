@@ -31,6 +31,8 @@ fn shortcut_lines(ctx: HelpContext) -> Vec<(&'static str, &'static str)> {
             lines.push(("/", "Filter sessions"));
             lines.push(("p", "Project view"));
             lines.push(("h", "History"));
+            lines.push(("U", "Upgrade + restart all"));
+            lines.push(("R", "Restart all sessions"));
             lines.push(("q", "Detach (keep sessions)"));
             lines.push(("Q", "Quit (kill sessions)"));
         }
@@ -38,6 +40,8 @@ fn shortcut_lines(ctx: HelpContext) -> Vec<(&'static str, &'static str)> {
             lines.push(("j / k", "Move up / down"));
             lines.push(("Enter", "Open project sessions"));
             lines.push(("n", "New session"));
+            lines.push(("U", "Upgrade + restart all"));
+            lines.push(("R", "Restart all sessions"));
             lines.push(("p / Esc", "Back to sessions"));
             lines.push(("q", "Detach (keep sessions)"));
             lines.push(("Q", "Quit (kill sessions)"));
@@ -49,6 +53,8 @@ fn shortcut_lines(ctx: HelpContext) -> Vec<(&'static str, &'static str)> {
             lines.push(("r", "Rename session"));
             lines.push(("e", "Open in editor"));
             lines.push(("n", "New session"));
+            lines.push(("U", "Upgrade + restart all"));
+            lines.push(("R", "Restart all sessions"));
             lines.push(("Esc", "Back to projects"));
             lines.push(("p", "Back to sessions"));
             lines.push(("q", "Detach (keep sessions)"));
@@ -121,8 +127,41 @@ pub fn render_help_overlay(frame: &mut Frame, area: Rect, ctx: HelpContext) {
     frame.render_widget(paragraph, popup_area);
 }
 
+/// Render a confirmation overlay popup (e.g. "Upgrade and restart N sessions? [y/n]").
+pub fn render_confirm_overlay(frame: &mut Frame, area: Rect, message: &str) {
+    let width = 50u16.min(area.width.saturating_sub(4));
+    let height = 5u16.min(area.height.saturating_sub(2));
+    let popup_area = centered_rect(width, height, area);
+
+    frame.render_widget(Clear, popup_area);
+
+    let block = Block::default()
+        .title(" Confirm ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .padding(Padding::horizontal(1));
+
+    let lines = vec![
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(message, Style::default().fg(Color::White)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "  [y]es  [n]o",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+    ];
+
+    let paragraph = Paragraph::new(lines).block(block);
+    frame.render_widget(paragraph, popup_area);
+}
+
 /// Return a centered `Rect` of the given size within `area`.
-fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+pub fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
     let vertical = Layout::vertical([Constraint::Length(height)])
         .flex(Flex::Center)
         .split(area);

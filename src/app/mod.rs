@@ -13,7 +13,7 @@ use crate::tui::sidebar::{
     render_history_sidebar, render_project_list, render_sidebar, render_sidebar_with_title,
     render_summary_bar, ProjectSummary,
 };
-use crate::tui::help::{HelpContext, render_help_overlay};
+use crate::tui::help::{HelpContext, render_confirm_overlay, render_help_overlay};
 use crate::tui::terminal::{render_empty_terminal, render_terminal};
 use anyhow::Result;
 use crossterm::event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind};
@@ -62,6 +62,20 @@ pub(super) enum AppMode {
     Startup { existing_sessions: Vec<String> },
     /// Normal operation.
     Normal,
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct RestartEntry {
+    pub(super) cwd: String,
+    pub(super) agent_kind: AgentKind,
+    pub(super) task_label: Option<String>,
+    pub(super) agent_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ConfirmAction {
+    UpgradeAndRestart,
+    RestartAll,
 }
 
 /// Which view the sidebar is currently showing.
@@ -144,6 +158,12 @@ pub struct App {
     pub(super) _watcher: Option<notify::RecommendedWatcher>,
     /// Last time we checked the watcher dirty set.
     pub(super) last_watcher_check: Instant,
+    /// Pending confirm action (U or R key).
+    pub(super) confirm_action: Option<ConfirmAction>,
+    /// Snapshot of sessions for restart/upgrade.
+    pub(super) restart_snapshot: Vec<RestartEntry>,
+    /// True while an upgrade tmux session is running.
+    pub(super) upgrading: bool,
 }
 
 impl App {
@@ -202,6 +222,9 @@ impl App {
             watcher_dirty: Arc::new(Mutex::new(HashSet::new())),
             _watcher: None,
             last_watcher_check: Instant::now(),
+            confirm_action: None,
+            restart_snapshot: Vec::new(),
+            upgrading: false,
         };
         result.start_watcher();
         result
@@ -252,6 +275,17 @@ impl App {
             return;
         }
 
+        // Monitor upgrade session progress.
+        if self.upgrading {
+            if let Ok(content) = self.manager.tmux().capture_pane("upgrade") {
+                self.terminal_content = content;
+            }
+            if self.manager.tmux().is_pane_dead("upgrade") {
+                let _ = self.finish_upgrade();
+            }
+            return;
+        }
+
         // Resize tmux panes to match the terminal view area.
         // Skip sessions with an attached external client (e.g. from `chatmux claude`).
         let pane_width = self.terminal_area.width.saturating_sub(2);
@@ -288,7 +322,9 @@ impl App {
                 std::mem::take(&mut *set)
             };
             if !dirty.is_empty() {
-                self.poll_dirty_sessions(&dirty);
+                if let Some(name) = self.poll_dirty_sessions(&dirty) {
+                    self.focus_session_by_name(&name);
+                }
                 self.auto_sort();
             }
         }
@@ -297,7 +333,9 @@ impl App {
         if self.last_status_poll.elapsed() >= STATUS_POLL_INTERVAL {
             self.last_status_poll = Instant::now();
             self.discover_external_sessions();
-            self.poll_session_statuses();
+            if let Some(name) = self.poll_session_statuses() {
+                self.focus_session_by_name(&name);
+            }
             self.auto_sort();
         }
     }
@@ -453,6 +491,23 @@ impl App {
         }
     }
 
+    /// Auto-focus a session by name when it transitions to Working.
+    /// Only switches focus if the user is not already in Terminal mode (to avoid disrupting typing).
+    fn focus_session_by_name(&mut self, name: &str) {
+        if self.focus == Focus::Terminal {
+            return;
+        }
+        if let Some(idx) = self
+            .manager
+            .sessions()
+            .iter()
+            .position(|s| s.name == name)
+        {
+            self.selected = Some(idx);
+            self.focus = Focus::Terminal;
+        }
+    }
+
     pub(super) fn create_session(&mut self, path: &str, agent_kind: AgentKind) -> Result<()> {
         let agent = self.registry.get(agent_kind);
         // Use the terminal area size (minus borders) for the tmux pane.
@@ -461,7 +516,7 @@ impl App {
         let idx = self.manager.create(path, agent, width, height)?;
         self.selected = Some(idx);
         self.picker = None;
-        self.focus = Focus::Sidebar;
+        self.focus = Focus::Terminal;
         // Add newly used path to cache if not already present.
         if !self.cached_projects.contains(&path.to_string()) {
             self.cached_projects.insert(0, path.to_string());
@@ -546,7 +601,143 @@ impl App {
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
+    /// Snapshot all current sessions for restart/upgrade.
+    pub(super) fn snapshot_sessions(&self) -> Vec<RestartEntry> {
+        self.manager
+            .sessions()
+            .iter()
+            .map(|s| RestartEntry {
+                cwd: s.cwd.clone(),
+                agent_kind: s.agent_kind,
+                task_label: s.task_label.clone(),
+                agent_session_id: s.agent_session_id.clone(),
+            })
+            .collect()
+    }
+
+    /// Kill all sessions (without recording history — they'll be resumed).
+    pub(super) fn kill_all_for_restart(&mut self) {
+        self.manager.kill_all_chatmux_sessions();
+        self.manager.sessions_mut().clear();
+        self.selected = None;
+        self.terminal_content.clear();
+        crate::session::state::remove();
+    }
+
+    /// Recreate sessions from a snapshot using resume commands.
+    pub(super) fn recreate_from_snapshot(&mut self, snapshot: &[RestartEntry]) -> Result<()> {
+        let width = self.terminal_area.width.saturating_sub(2);
+        let height = self.terminal_area.height.saturating_sub(2);
+
+        for entry in snapshot {
+            let agent = self.registry.get(entry.agent_kind);
+            let idx = self.manager.create_resume(
+                &entry.cwd,
+                agent,
+                entry.agent_session_id.as_deref(),
+                width,
+                height,
+            )?;
+            if let Some(ref label) = entry.task_label {
+                if let Some(session) = self.manager.sessions_mut().get_mut(idx) {
+                    session.task_label = Some(label.clone());
+                }
+            }
+        }
+
+        if !self.manager.is_empty() {
+            self.selected = Some(0);
+        }
+        Ok(())
+    }
+
+    /// Execute restart-all: snapshot → kill → recreate.
+    pub(super) fn do_restart_all(&mut self) -> Result<()> {
+        let snapshot = self.snapshot_sessions();
+        self.kill_all_for_restart();
+        self.recreate_from_snapshot(&snapshot)?;
+        Ok(())
+    }
+
+    /// Start upgrade + restart: snapshot → kill → run upgrade script.
+    pub(super) fn do_upgrade_and_restart(&mut self) -> Result<()> {
+        self.restart_snapshot = self.snapshot_sessions();
+        self.kill_all_for_restart();
+
+        let script = self.build_upgrade_script();
+        let width = self.terminal_area.width.saturating_sub(2);
+        let height = self.terminal_area.height.saturating_sub(2);
+
+        self.manager.tmux().new_session_with_remain_on_exit(
+            "upgrade",
+            "/tmp",
+            "sh",
+            &["-c".into(), script],
+            width,
+            height,
+        )?;
+        self.upgrading = true;
+        Ok(())
+    }
+
+    /// Called when the upgrade tmux session finishes.
+    pub(super) fn finish_upgrade(&mut self) -> Result<()> {
+        self.upgrading = false;
+        let _ = self.manager.tmux().kill_session("upgrade");
+        let snapshot = std::mem::take(&mut self.restart_snapshot);
+        self.recreate_from_snapshot(&snapshot)?;
+        Ok(())
+    }
+
+    /// Build a shell script that upgrades all agent kinds used in the snapshot.
+    fn build_upgrade_script(&self) -> String {
+        let mut kinds: HashSet<AgentKind> = self
+            .restart_snapshot
+            .iter()
+            .map(|e| e.agent_kind)
+            .collect();
+
+        // If no sessions, upgrade all available agents.
+        if kinds.is_empty() {
+            for agent in self.registry.available() {
+                kinds.insert(agent.kind());
+            }
+        }
+
+        let mut commands = Vec::new();
+        if kinds.contains(&AgentKind::ClaudeCode) {
+            commands.push(self.config.upgrade.claude_code.clone());
+        }
+        if kinds.contains(&AgentKind::Codex) {
+            commands.push(self.config.upgrade.codex.clone());
+        }
+
+        if commands.is_empty() {
+            "echo 'No agents to upgrade'".into()
+        } else {
+            commands.join(" && ")
+        }
+    }
+
+    /// Execute the confirmed action (called from input handler).
+    pub(super) fn execute_confirmed_action(&mut self) -> Result<()> {
+        let action = self.confirm_action.take();
+        match action {
+            Some(ConfirmAction::UpgradeAndRestart) => self.do_upgrade_and_restart(),
+            Some(ConfirmAction::RestartAll) => self.do_restart_all(),
+            None => Ok(()),
+        }
+    }
+
+    /// Number of active sessions (for confirm dialog message).
+    pub(super) fn session_count(&self) -> usize {
+        self.manager.len()
+    }
+
     pub fn cleanup(&mut self) {
+        if self.upgrading {
+            let _ = self.manager.tmux().kill_session("upgrade");
+        }
         if self.detach_on_quit {
             self.manager.detach();
         } else {

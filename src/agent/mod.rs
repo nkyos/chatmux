@@ -73,6 +73,21 @@ pub trait Agent: Send + Sync {
 
     /// Discover recent projects from this agent's history.
     fn discover_projects(&self) -> Vec<String>;
+
+    /// Extract the agent's session ID from a JSONL file path or contents.
+    fn extract_session_id(&self, _jsonl_path: &Path) -> Option<String> {
+        None
+    }
+
+    /// Command for resuming a session (may differ from `command()`).
+    fn resume_command(&self) -> &str {
+        self.command()
+    }
+
+    /// Args for resuming a session by ID. Falls back to regular args if no ID.
+    fn resume_args(&self, _session_id: Option<&str>) -> Vec<String> {
+        self.args()
+    }
 }
 
 pub struct AgentRegistry {

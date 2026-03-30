@@ -10,6 +10,23 @@ pub struct Config {
     pub notifications: NotificationConfig,
     pub display: DisplayConfig,
     pub theme: ThemeConfig,
+    pub upgrade: UpgradeConfig,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct UpgradeConfig {
+    pub claude_code: String,
+    pub codex: String,
+}
+
+impl Default for UpgradeConfig {
+    fn default() -> Self {
+        Self {
+            claude_code: "brew upgrade claude-code".into(),
+            codex: "brew upgrade codex".into(),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

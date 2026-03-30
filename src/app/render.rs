@@ -116,8 +116,17 @@ impl App {
             frame.render_widget(hint, sidebar_chunks[2]);
         }
 
-        // Right pane: project picker or terminal.
-        if let Some(ref picker) = self.picker {
+        // Right pane: project picker, upgrade output, or terminal.
+        if self.upgrading {
+            render_terminal(
+                frame,
+                chunks[1],
+                &self.terminal_content,
+                Some("Upgrading..."),
+                true,
+                &self.theme,
+            );
+        } else if let Some(ref picker) = self.picker {
             render_project_picker(frame, chunks[1], picker);
         } else if self.selected.is_some() {
             let label = self
@@ -179,6 +188,24 @@ impl App {
             }
         } else {
             render_empty_terminal(frame, chunks[1], &self.theme);
+        }
+
+        // Confirm overlay (drawn on top).
+        if let Some(ref action) = self.confirm_action {
+            let n = self.session_count();
+            let msg = match action {
+                ConfirmAction::UpgradeAndRestart => {
+                    if n == 0 {
+                        "Upgrade agents?".to_string()
+                    } else {
+                        format!("Upgrade and restart {} session{}?", n, if n == 1 { "" } else { "s" })
+                    }
+                }
+                ConfirmAction::RestartAll => {
+                    format!("Restart all {} session{}?", n, if n == 1 { "" } else { "s" })
+                }
+            };
+            render_confirm_overlay(frame, frame.area(), &msg);
         }
 
         // Help overlay (drawn last, on top of everything).
