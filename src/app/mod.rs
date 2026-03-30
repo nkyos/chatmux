@@ -495,17 +495,24 @@ impl App {
     }
 
     /// Auto-focus a session by name when it transitions to Working.
-    /// Only switches focus if the user is not already in Terminal mode (to avoid disrupting typing).
+    /// - If the user is on the Sidebar: select that session and switch to Terminal.
+    /// - If the user is in Terminal and it's the selected session: switch back to Sidebar
+    ///   (the user just sent a message and the agent started working).
     fn focus_session_by_name(&mut self, name: &str) {
-        if self.focus == Focus::Terminal {
-            return;
-        }
-        if let Some(idx) = self
+        let idx = self
             .manager
             .sessions()
             .iter()
-            .position(|s| s.name == name)
-        {
+            .position(|s| s.name == name);
+
+        if self.focus == Focus::Terminal {
+            // The selected session just started working → return to sidebar.
+            if self.selected == idx {
+                self.focus = Focus::Sidebar;
+            }
+            return;
+        }
+        if let Some(idx) = idx {
             self.selected = Some(idx);
             self.focus = Focus::Terminal;
         }
@@ -521,6 +528,20 @@ impl App {
         self.picker = None;
         self.focus = Focus::Terminal;
         // Add newly used path to cache if not already present.
+        if !self.cached_projects.contains(&path.to_string()) {
+            self.cached_projects.insert(0, path.to_string());
+        }
+        Ok(())
+    }
+
+    pub(super) fn resume_in_project(&mut self, path: &str, agent_kind: AgentKind) -> Result<()> {
+        let agent = self.registry.get(agent_kind);
+        let width = self.terminal_area.width.saturating_sub(2);
+        let height = self.terminal_area.height.saturating_sub(2);
+        let idx = self.manager.create_resume_picker(path, agent, width, height)?;
+        self.selected = Some(idx);
+        self.picker = None;
+        self.focus = Focus::Terminal;
         if !self.cached_projects.contains(&path.to_string()) {
             self.cached_projects.insert(0, path.to_string());
         }

@@ -84,6 +84,10 @@ impl Agent for CodexAgent {
             ],
         }
     }
+
+    fn resume_picker_args(&self) -> Vec<String> {
+        vec!["resume".into()]
+    }
 }
 
 /// List all Codex session JSONL files matching the given cwd.

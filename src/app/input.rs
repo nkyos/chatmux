@@ -113,7 +113,7 @@ impl App {
                     match self.focus {
                         Focus::Sidebar => self.handle_sidebar_key(key.code, key.modifiers)?,
                         Focus::Terminal => self.handle_terminal_key(key.code, key.modifiers)?,
-                        Focus::ProjectPicker => self.handle_picker_key(key.code)?,
+                        Focus::ProjectPicker => self.handle_picker_key(key.code, key.modifiers)?,
                     }
                 }
                 Event::Paste(text) => {
@@ -939,7 +939,34 @@ impl App {
         Ok(())
     }
 
-    fn handle_picker_key(&mut self, code: KeyCode) -> Result<()> {
+    fn handle_picker_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        // Ctrl+R: resume in the selected project.
+        if code == KeyCode::Char('r') && modifiers.contains(KeyModifiers::CONTROL) {
+            if let Some(ref picker) = self.picker {
+                let path = match picker.mode {
+                    PickerMode::RecentProjects => {
+                        let filtered = picker.filtered_recent_projects();
+                        filtered.get(picker.selected).cloned()
+                    }
+                    PickerMode::DirectoryBrowser => {
+                        Some(picker.browser_cwd.clone())
+                    }
+                    PickerMode::AgentSelect { ref path } => {
+                        Some(path.clone())
+                    }
+                };
+                if let Some(path) = path {
+                    let agent_kind = picker
+                        .available_agents
+                        .first()
+                        .copied()
+                        .unwrap_or_default();
+                    return self.resume_in_project(&path, agent_kind);
+                }
+            }
+            return Ok(());
+        }
+
         let Some(ref mut picker) = self.picker else {
             return Ok(());
         };

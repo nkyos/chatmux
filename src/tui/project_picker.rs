@@ -366,7 +366,7 @@ fn render_recent_projects(frame: &mut Frame, area: Rect, picker: &ProjectPicker)
     ])));
 
     let help = Line::from(Span::styled(
-        "  ↑↓: select  type: filter  Enter: confirm  Esc: cancel",
+        "  ↑↓: select  type: filter  Enter: new  ^R: resume  Esc: cancel",
         Style::default().fg(Color::DarkGray),
     ));
     items.push(ListItem::new(Line::from("")));

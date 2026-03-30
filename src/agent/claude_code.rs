@@ -184,6 +184,10 @@ impl Agent for ClaudeCodeAgent {
             ],
         }
     }
+
+    fn resume_picker_args(&self) -> Vec<String> {
+        vec!["--resume".into()]
+    }
 }
 
 /// Encode a filesystem path to Claude's project directory name.

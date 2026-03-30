@@ -364,6 +364,32 @@ impl SessionManager {
         Ok(self.sessions.len() - 1)
     }
 
+    /// Create a session running the agent's interactive resume/session picker.
+    pub fn create_resume_picker(
+        &mut self,
+        cwd: &str,
+        agent: &dyn Agent,
+        width: u16,
+        height: u16,
+    ) -> Result<usize> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let name = format!("s{id}");
+
+        self.tmux.new_session(
+            &name,
+            cwd,
+            agent.resume_command(),
+            &agent.resume_picker_args(),
+            width,
+            height,
+        )?;
+
+        let session = Session::new(name, cwd.to_string(), agent.kind());
+        self.sessions.push(session);
+        Ok(self.sessions.len() - 1)
+    }
+
     /// Kill all chatmux tmux sessions (including orphaned ones not tracked by this manager).
     pub fn kill_all_chatmux_sessions(&self) {
         for name in self.tmux.list_chatmux_sessions() {

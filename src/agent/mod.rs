@@ -88,6 +88,11 @@ pub trait Agent: Send + Sync {
     fn resume_args(&self, _session_id: Option<&str>) -> Vec<String> {
         self.args()
     }
+
+    /// Args for launching the interactive resume/session picker.
+    fn resume_picker_args(&self) -> Vec<String> {
+        self.args()
+    }
 }
 
 pub struct AgentRegistry {
