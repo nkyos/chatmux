@@ -182,8 +182,16 @@ impl Session {
 pub fn detect_git_branch(cwd: &str) -> Option<String> {
     let mut dir = Path::new(cwd);
     loop {
-        let head = dir.join(".git/HEAD");
-        if let Ok(content) = std::fs::read_to_string(&head) {
+        let dot_git = dir.join(".git");
+        let head_path = if dot_git.is_file() {
+            // Worktree: .git is a file containing "gitdir: <path>"
+            let content = std::fs::read_to_string(&dot_git).ok()?;
+            let gitdir = content.trim().strip_prefix("gitdir: ")?;
+            Path::new(gitdir).join("HEAD")
+        } else {
+            dot_git.join("HEAD")
+        };
+        if let Ok(content) = std::fs::read_to_string(&head_path) {
             let content = content.trim();
             if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
                 return Some(branch.to_string());

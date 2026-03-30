@@ -225,7 +225,9 @@ impl SessionManager {
                                 len: entry.jsonl_len.unwrap_or(0),
                             }
                         });
-                    session.branch = entry.branch;
+                    if entry.branch.is_some() {
+                        session.branch = entry.branch;
+                    }
                     session.agent_session_id = entry.agent_session_id;
                     // Restore last activity from saved epoch or JSONL file mtime.
                     let file_epoch = session

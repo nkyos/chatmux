@@ -194,6 +194,10 @@ impl App {
                 }
             }
 
+            // Refresh git branch (may change during session).
+            // Placed before JSONL guards so idle/completed sessions still get updated.
+            session.refresh_branch();
+
             // Extract agent session ID when JSONL is first resolved.
             if session.agent_session_id.is_none() {
                 if let Some(ref path) = session.jsonl_path {
@@ -245,9 +249,6 @@ impl App {
                     session.last_reply = detected.last_reply;
                 }
             }
-
-            // Refresh git branch (may change during session).
-            session.refresh_branch();
         }
 
         became_working
