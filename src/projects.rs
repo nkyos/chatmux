@@ -20,8 +20,8 @@ pub fn discover_projects() -> Vec<String> {
             if !name.starts_with('-') {
                 continue;
             }
-            if let Some(path) = decode_project_path(&name) {
-                if Path::new(&path).is_dir() {
+            if let Some(path) = decode_project_path(&name)
+                && Path::new(&path).is_dir() {
                     let modified = entry
                         .metadata()
                         .ok()
@@ -29,7 +29,6 @@ pub fn discover_projects() -> Vec<String> {
                         .unwrap_or(std::time::UNIX_EPOCH);
                     entries.push((path, modified));
                 }
-            }
         }
     }
 

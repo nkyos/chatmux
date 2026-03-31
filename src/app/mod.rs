@@ -1,4 +1,6 @@
 mod input;
+mod input_keys;
+mod input_mouse;
 mod render;
 mod session_sync;
 
@@ -10,7 +12,7 @@ use crate::session::{SessionManager, SortMode};
 use crate::tui::project_picker::{PickerMode, ProjectPicker, render_project_picker};
 use crate::tui::render_startup_screen;
 use crate::tui::sidebar::{
-    render_history_sidebar, render_project_list, render_sidebar, render_sidebar_with_title,
+    SidebarParams, render_history_sidebar, render_project_list, render_sidebar,
     render_summary_bar, ProjectSummary,
 };
 use crate::tui::help::{HelpContext, render_confirm_overlay, render_help_overlay};
@@ -101,6 +103,61 @@ pub(super) fn is_prefix_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
         && matches!(code, KeyCode::Char(']') | KeyCode::Char('5'))
 }
 
+/// Sidebar UI state (view mode, selection, filter, scroll).
+pub(super) struct SidebarState {
+    pub(super) view: SidebarView,
+    pub(super) sort_mode: SortMode,
+    pub(super) filter_input: Option<String>,
+    pub(super) rename_buf: Option<String>,
+    pub(super) list_state: ListState,
+    /// Project list view.
+    pub(super) project_selected: usize,
+    pub(super) project_list_state: ListState,
+    /// History view.
+    pub(super) show_history: bool,
+    pub(super) history_entries: Vec<HistoryEntry>,
+    pub(super) history_selected: usize,
+    pub(super) history_list_state: ListState,
+    /// Cached area for mouse click detection.
+    pub(super) area: Rect,
+}
+
+impl Default for SidebarState {
+    fn default() -> Self {
+        Self {
+            view: SidebarView::Sessions,
+            sort_mode: SortMode::StatusPriority,
+            filter_input: None,
+            rename_buf: None,
+            list_state: ListState::default(),
+            project_selected: 0,
+            project_list_state: ListState::default(),
+            show_history: false,
+            history_entries: Vec::new(),
+            history_selected: 0,
+            history_list_state: ListState::default(),
+            area: Rect::default(),
+        }
+    }
+}
+
+/// Terminal pane state (content, scroll, selection).
+#[derive(Default)]
+pub(super) struct TerminalState {
+    pub(super) content: String,
+    /// Scroll offset: lines scrolled back from bottom (0 = live view).
+    pub(super) scroll: u16,
+    /// Cached history size captured when scrolling begins.
+    pub(super) scroll_history: u16,
+    /// Active text selection.
+    pub(super) selection: Option<Selection>,
+    /// Prefix mode active (Ctrl+] was pressed, waiting for next key).
+    pub(super) prefix_active: bool,
+    /// Cached area for pane sizing.
+    pub(super) area: Rect,
+}
+
+
 pub struct App {
     pub(super) config: Config,
     pub(super) theme: ResolvedTheme,
@@ -112,48 +169,15 @@ pub struct App {
     pub(super) should_quit: bool,
     /// If true, save state on quit instead of killing sessions.
     pub(super) detach_on_quit: bool,
-    pub(super) terminal_content: String,
-    /// Terminal scroll offset: lines scrolled back from the bottom (0 = live view).
-    pub(super) terminal_scroll: u16,
-    /// Cached history size captured when scrolling begins (avoids per-frame tmux queries).
-    pub(super) terminal_scroll_history: u16,
+    pub(super) sidebar: SidebarState,
+    pub(super) terminal: TerminalState,
     pub(super) picker: Option<ProjectPicker>,
-    /// Cached terminal area for pane sizing.
-    pub(super) terminal_area: Rect,
-    /// Cached sidebar area for mouse click detection.
-    pub(super) sidebar_area: Rect,
-    /// Last time we checked JSONL files for status.
-    pub(super) last_status_poll: Instant,
-    /// Prefix mode active (Ctrl+] was pressed, waiting for next key).
-    pub(super) prefix_active: bool,
-    /// Current sort mode.
-    pub(super) sort_mode: SortMode,
-    /// Rename mode: Some(buffer) when editing a session label.
-    pub(super) rename_buf: Option<String>,
-    /// Filter mode: Some(filter_text) when filtering sessions.
-    pub(super) filter_input: Option<String>,
-    /// History mode toggle.
-    pub(super) show_history: bool,
-    /// Loaded history entries.
-    pub(super) history_entries: Vec<HistoryEntry>,
-    /// Selected index in history view.
-    pub(super) history_selected: usize,
-    /// Scroll state for sidebar session list.
-    pub(super) sidebar_list_state: ListState,
-    /// Scroll state for history sidebar list.
-    pub(super) history_list_state: ListState,
     /// Cached project list (computed once at startup to avoid repeated I/O).
     pub(super) cached_projects: Vec<String>,
-    /// Current sidebar view mode.
-    pub(super) sidebar_view: SidebarView,
-    /// Selected index in project list view.
-    pub(super) project_selected: usize,
-    /// Scroll state for project list.
-    pub(super) project_list_state: ListState,
     /// Whether the help overlay is shown.
     pub(super) show_help: bool,
-    /// Active text selection in the terminal area.
-    pub(super) selection: Option<Selection>,
+    /// Last time we checked JSONL files for status.
+    pub(super) last_status_poll: Instant,
     /// Set of paths dirtied by the file watcher (shared with watcher thread).
     pub(super) watcher_dirty: Arc<Mutex<HashSet<PathBuf>>>,
     /// Keep the watcher alive (dropped on App drop).
@@ -200,28 +224,12 @@ impl App {
             mode,
             should_quit: false,
             detach_on_quit: false,
-            terminal_content: String::new(),
-            terminal_scroll: 0,
-            terminal_scroll_history: 0,
+            sidebar: SidebarState::default(),
+            terminal: TerminalState::default(),
             picker: None,
-            terminal_area: Rect::default(),
-            sidebar_area: Rect::default(),
-            last_status_poll: Instant::now(),
-            prefix_active: false,
-            sort_mode: SortMode::StatusPriority,
-            rename_buf: None,
-            filter_input: None,
-            show_history: false,
-            history_entries: Vec::new(),
-            history_selected: 0,
-            sidebar_list_state: ListState::default(),
-            history_list_state: ListState::default(),
             cached_projects,
-            sidebar_view: SidebarView::Sessions,
-            project_selected: 0,
-            project_list_state: ListState::default(),
             show_help: false,
-            selection: None,
+            last_status_poll: Instant::now(),
             watcher_dirty: Arc::new(Mutex::new(HashSet::new())),
             _watcher: None,
             last_watcher_check: Instant::now(),
@@ -281,7 +289,7 @@ impl App {
         // Monitor upgrade session progress.
         if self.upgrading {
             if let Ok(content) = self.manager.tmux().capture_pane("upgrade") {
-                self.terminal_content = content;
+                self.terminal.content = content;
             }
             if self.manager.tmux().is_pane_dead("upgrade") {
                 let _ = self.finish_upgrade();
@@ -291,8 +299,8 @@ impl App {
 
         // Resize tmux panes to match the terminal view area.
         // Skip sessions with an attached external client (e.g. from `chatmux claude`).
-        let pane_width = self.terminal_area.width.saturating_sub(2);
-        let pane_height = self.terminal_area.height.saturating_sub(2);
+        let pane_width = self.terminal.area.width.saturating_sub(2);
+        let pane_height = self.terminal.area.height.saturating_sub(2);
         if pane_width > 0 && pane_height > 0 {
             for i in 0..self.manager.len() {
                 if self.manager.get(i).is_some_and(|s| s.attached_externally) {
@@ -303,19 +311,18 @@ impl App {
         }
 
         // Capture content for the selected session.
-        if let Some(idx) = self.selected {
-            if idx < self.manager.len() {
-                let result = if self.terminal_scroll > 0 {
+        if let Some(idx) = self.selected
+            && idx < self.manager.len() {
+                let result = if self.terminal.scroll > 0 {
                     self.manager
-                        .capture_scroll(idx, self.terminal_scroll, pane_height)
+                        .capture_scroll(idx, self.terminal.scroll, pane_height)
                 } else {
                     self.manager.capture(idx)
                 };
                 if let Ok(content) = result {
-                    self.terminal_content = content;
+                    self.terminal.content = content;
                 }
             }
-        }
 
         // Check watcher for dirty JSONL files and poll affected sessions.
         if self.last_watcher_check.elapsed() >= WATCHER_CHECK_INTERVAL {
@@ -403,7 +410,7 @@ impl App {
 
     /// Compute visible session indices based on current filter.
     pub(super) fn visible_indices(&self) -> Vec<usize> {
-        let Some(ref filter) = self.filter_input else {
+        let Some(ref filter) = self.sidebar.filter_input else {
             return (0..self.manager.len()).collect();
         };
         if filter.is_empty() {
@@ -430,6 +437,16 @@ impl App {
 
     pub(super) fn select_next(&mut self) {
         let visible = self.visible_indices();
+        self.select_next_in(&visible);
+    }
+
+    pub(super) fn select_prev(&mut self) {
+        let visible = self.visible_indices();
+        self.select_prev_in(&visible);
+    }
+
+    /// Move selection to the next item within the given visible indices.
+    pub(super) fn select_next_in(&mut self, visible: &[usize]) {
         if visible.is_empty() {
             return;
         }
@@ -445,12 +462,12 @@ impl App {
             None => visible[0],
         });
         if self.selected != old {
-            self.terminal_scroll = 0;
+            self.terminal.scroll = 0;
         }
     }
 
-    pub(super) fn select_prev(&mut self) {
-        let visible = self.visible_indices();
+    /// Move selection to the previous item within the given visible indices.
+    pub(super) fn select_prev_in(&mut self, visible: &[usize]) {
         if visible.is_empty() {
             return;
         }
@@ -466,19 +483,59 @@ impl App {
             None => visible[0],
         });
         if self.selected != old {
-            self.terminal_scroll = 0;
+            self.terminal.scroll = 0;
         }
+    }
+
+    /// Handle a click on a session list (used by both Sessions and ProjectSessions views).
+    pub(super) fn click_session_list(&mut self, content_y: usize, visible: &[usize]) -> Result<()> {
+        let offset = self.sidebar.list_state.offset();
+        let has_filter = self.sidebar.filter_input.is_some();
+        let filter_items = if has_filter { 2 } else { 0 };
+        let total_items = filter_items + visible.len();
+        let mut y_accum = 0usize;
+
+        for item_idx in offset..total_items {
+            let height = if has_filter && item_idx < 2 {
+                1
+            } else {
+                let vis_idx = if has_filter { item_idx - 2 } else { item_idx };
+                if vis_idx < visible.len() {
+                    let session = &self.manager.sessions()[visible[vis_idx]];
+                    let has_prompt = session.task_label.is_some()
+                        || session.last_prompt.is_some();
+                    let has_reply = session.last_reply.as_ref()
+                        .is_some_and(|r| !r.trim().is_empty());
+                    let has_branch = session.branch.is_some();
+                    2 + has_prompt as usize + has_reply as usize + has_branch as usize
+                } else {
+                    2
+                }
+            };
+            if content_y < y_accum + height {
+                if has_filter && item_idx < 2 {
+                    return Ok(());
+                }
+                let vis_idx = if has_filter { item_idx - 2 } else { item_idx };
+                if vis_idx < visible.len() {
+                    self.selected = Some(visible[vis_idx]);
+                    self.terminal.scroll = 0;
+                    self.focus = Focus::Sidebar;
+                }
+                return Ok(());
+            }
+            y_accum += height;
+        }
+        Ok(())
     }
 
     /// If the selected session is Replied, mark it as Read.
     pub(super) fn mark_selected_as_read(&mut self) {
-        if let Some(idx) = self.selected {
-            if let Some(session) = self.manager.sessions_mut().get_mut(idx) {
-                if session.status == crate::session::SessionStatus::Replied {
+        if let Some(idx) = self.selected
+            && let Some(session) = self.manager.sessions_mut().get_mut(idx)
+                && session.status == crate::session::SessionStatus::Replied {
                     session.status = crate::session::SessionStatus::Read;
                 }
-            }
-        }
     }
 
     /// Ensure the selected session is within the visible (filtered) list.
@@ -487,11 +544,10 @@ impl App {
         if visible.is_empty() {
             return;
         }
-        if let Some(sel) = self.selected {
-            if !visible.contains(&sel) {
+        if let Some(sel) = self.selected
+            && !visible.contains(&sel) {
                 self.selected = Some(visible[0]);
             }
-        }
     }
 
     /// Auto-focus a session by name when it transitions to Working.
@@ -521,8 +577,8 @@ impl App {
     pub(super) fn create_session(&mut self, path: &str, agent_kind: AgentKind) -> Result<()> {
         let agent = self.registry.get(agent_kind);
         // Use the terminal area size (minus borders) for the tmux pane.
-        let width = self.terminal_area.width.saturating_sub(2);
-        let height = self.terminal_area.height.saturating_sub(2);
+        let width = self.terminal.area.width.saturating_sub(2);
+        let height = self.terminal.area.height.saturating_sub(2);
         let idx = self.manager.create(path, agent, width, height)?;
         self.selected = Some(idx);
         self.picker = None;
@@ -536,8 +592,8 @@ impl App {
 
     pub(super) fn resume_in_project(&mut self, path: &str, agent_kind: AgentKind) -> Result<()> {
         let agent = self.registry.get(agent_kind);
-        let width = self.terminal_area.width.saturating_sub(2);
-        let height = self.terminal_area.height.saturating_sub(2);
+        let width = self.terminal.area.width.saturating_sub(2);
+        let height = self.terminal.area.height.saturating_sub(2);
         let idx = self.manager.create_resume_picker(path, agent, width, height)?;
         self.selected = Some(idx);
         self.picker = None;
@@ -568,10 +624,10 @@ impl App {
     pub(super) fn plain_lines(&self) -> Vec<String> {
         use ansi_to_tui::IntoText;
         let text = self
-            .terminal_content
+            .terminal.content
             .as_bytes()
             .into_text()
-            .unwrap_or_else(|_| ratatui::text::Text::raw(&self.terminal_content));
+            .unwrap_or_else(|_| ratatui::text::Text::raw(&self.terminal.content));
         text.lines
             .iter()
             .map(|line| {
@@ -644,14 +700,14 @@ impl App {
         self.manager.kill_all_chatmux_sessions();
         self.manager.sessions_mut().clear();
         self.selected = None;
-        self.terminal_content.clear();
+        self.terminal.content.clear();
         crate::session::state::remove();
     }
 
     /// Recreate sessions from a snapshot using resume commands.
     pub(super) fn recreate_from_snapshot(&mut self, snapshot: &[RestartEntry]) -> Result<()> {
-        let width = self.terminal_area.width.saturating_sub(2);
-        let height = self.terminal_area.height.saturating_sub(2);
+        let width = self.terminal.area.width.saturating_sub(2);
+        let height = self.terminal.area.height.saturating_sub(2);
 
         for entry in snapshot {
             let agent = self.registry.get(entry.agent_kind);
@@ -662,11 +718,10 @@ impl App {
                 width,
                 height,
             )?;
-            if let Some(ref label) = entry.task_label {
-                if let Some(session) = self.manager.sessions_mut().get_mut(idx) {
+            if let Some(ref label) = entry.task_label
+                && let Some(session) = self.manager.sessions_mut().get_mut(idx) {
                     session.task_label = Some(label.clone());
                 }
-            }
         }
 
         if !self.manager.is_empty() {
@@ -689,8 +744,8 @@ impl App {
         self.kill_all_for_restart();
 
         let script = self.build_upgrade_script();
-        let width = self.terminal_area.width.saturating_sub(2);
-        let height = self.terminal_area.height.saturating_sub(2);
+        let width = self.terminal.area.width.saturating_sub(2);
+        let height = self.terminal.area.height.saturating_sub(2);
 
         self.manager.tmux().new_session_with_remain_on_exit(
             "upgrade",

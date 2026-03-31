@@ -31,16 +31,12 @@ impl Default for UpgradeConfig {
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct EditorConfig {
     /// Command to open the editor. Defaults to $EDITOR or "code".
     pub command: Option<String>,
 }
 
-impl Default for EditorConfig {
-    fn default() -> Self {
-        Self { command: None }
-    }
-}
 
 #[derive(Debug, Deserialize)]
 #[serde(default)]
@@ -162,7 +158,13 @@ impl Config {
             return Self::default();
         };
 
-        toml::from_str(&content).unwrap_or_default()
+        match toml::from_str(&content) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!("chatmux: failed to parse config: {e}");
+                Self::default()
+            }
+        }
     }
 
     /// Get the editor command split into program and arguments.
@@ -183,16 +185,14 @@ impl Config {
         if let Some(ref cmd) = self.editor.command {
             return cmd.clone();
         }
-        if let Ok(v) = std::env::var("VISUAL") {
-            if !v.is_empty() {
+        if let Ok(v) = std::env::var("VISUAL")
+            && !v.is_empty() {
                 return v;
             }
-        }
-        if let Ok(v) = std::env::var("EDITOR") {
-            if !v.is_empty() {
+        if let Ok(v) = std::env::var("EDITOR")
+            && !v.is_empty() {
                 return v;
             }
-        }
         // Auto-detect installed GUI editors.
         for candidate in &["cursor", "code", "zed"] {
             if command_exists(candidate) {

@@ -51,8 +51,8 @@ pub fn render_terminal(
     frame.render_widget(paragraph, area);
 
     // Render scrollbar by painting directly into the buffer.
-    if let Some(scroll) = scroll {
-        if scroll.history_size > 0 && scroll.offset > 0 {
+    if let Some(scroll) = scroll
+        && scroll.history_size > 0 && scroll.offset > 0 {
             let track_height = area.height.saturating_sub(2) as usize;
             if track_height == 0 {
                 return;
@@ -60,7 +60,7 @@ pub fn render_terminal(
             let total = scroll.history_size as usize + track_height;
 
             // Thumb size: proportional to viewport / total, minimum 1 row.
-            let thumb_len = ((track_height * track_height + total - 1) / total).max(1);
+            let thumb_len = (track_height * track_height).div_ceil(total).max(1);
 
             // Scroll ratio: offset=0 is bottom, offset=history_size is top.
             // Map to thumb position where 0 = top of track.
@@ -90,7 +90,6 @@ pub fn render_terminal(
                 }
             }
         }
-    }
 }
 
 pub fn render_empty_terminal(frame: &mut Frame, area: Rect, theme: &ResolvedTheme) {

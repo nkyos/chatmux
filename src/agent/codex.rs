@@ -31,20 +31,6 @@ impl Agent for CodexAgent {
         list_all_sessions_for_cwd(&sessions_dir, cwd)
     }
 
-    fn find_session_file(&self, cwd: &str, exclude: &[PathBuf]) -> Option<PathBuf> {
-        // Codex stores sessions at ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl
-        // The first line of each file contains session_meta with cwd.
-        // We find the most recently modified JSONL whose cwd matches.
-        let home = std::env::var("HOME").ok()?;
-        let sessions_dir = PathBuf::from(&home).join(".codex/sessions");
-
-        if !sessions_dir.is_dir() {
-            return None;
-        }
-
-        find_latest_session_for_cwd(&sessions_dir, cwd, exclude)
-    }
-
     fn detect_status(&self, session_file: &Path) -> Option<DetectedStatus> {
         detect_codex_status(session_file)
     }
@@ -121,61 +107,6 @@ fn list_all_sessions_for_cwd(sessions_dir: &Path, cwd: &str) -> Vec<PathBuf> {
     results
 }
 
-/// Find the most recently modified Codex session JSONL file whose cwd matches.
-/// Scans recent date directories (latest first) to avoid scanning thousands of files.
-fn find_latest_session_for_cwd(
-    sessions_dir: &Path,
-    cwd: &str,
-    exclude: &[PathBuf],
-) -> Option<PathBuf> {
-    // Collect year dirs, sorted descending.
-    let mut year_dirs = list_sorted_dirs(sessions_dir)?;
-    year_dirs.reverse();
-
-    for year_dir in year_dirs.iter().take(2) {
-        let mut month_dirs = list_sorted_dirs(year_dir)?;
-        month_dirs.reverse();
-
-        for month_dir in month_dirs.iter().take(3) {
-            let mut day_dirs = list_sorted_dirs(month_dir)?;
-            day_dirs.reverse();
-
-            for day_dir in day_dirs.iter().take(31) {
-                if let Some(path) = find_session_in_dir(day_dir, cwd, exclude) {
-                    return Some(path);
-                }
-            }
-        }
-    }
-
-    None
-}
-
-/// Find the most recently modified JSONL in a day directory matching the given cwd.
-fn find_session_in_dir(day_dir: &Path, cwd: &str, exclude: &[PathBuf]) -> Option<PathBuf> {
-    let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = Vec::new();
-
-    for entry in fs::read_dir(day_dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().is_some_and(|e| e == "jsonl") {
-            if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
-                candidates.push((path, modified));
-            }
-        }
-    }
-
-    // Sort by most recently modified first.
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
-
-    for (path, _) in candidates {
-        if !exclude.contains(&path) && session_matches_cwd(&path, cwd) {
-            return Some(path);
-        }
-    }
-
-    None
-}
-
 /// Check if a Codex session JSONL's cwd matches the expected cwd.
 fn session_matches_cwd(path: &Path, expected_cwd: &str) -> bool {
     let Ok(file) = fs::File::open(path) else {
@@ -191,11 +122,10 @@ fn session_matches_cwd(path: &Path, expected_cwd: &str) -> bool {
         return false;
     };
 
-    if entry.r#type.as_deref() == Some("session_meta") {
-        if let Some(ref payload) = entry.payload {
+    if entry.r#type.as_deref() == Some("session_meta")
+        && let Some(ref payload) = entry.payload {
             return payload.cwd.as_deref() == Some(expected_cwd);
         }
-    }
 
     false
 }
@@ -218,7 +148,6 @@ fn detect_codex_status(session_file: &Path) -> Option<DetectedStatus> {
     let mut last_event_type: Option<String> = None;
     let mut last_payload_type: Option<String> = None;
     let mut last_role: Option<String> = None;
-    let mut last_timestamp: Option<String> = None;
     let mut last_user_message: Option<String> = None;
     let mut last_assistant_text: Option<String> = None;
     let mut parsed: usize = 0;
@@ -236,31 +165,24 @@ fn detect_codex_status(session_file: &Path) -> Option<DetectedStatus> {
         if let Some(ref t) = entry.r#type {
             parsed += 1;
             last_event_type = Some(t.clone());
-            if entry.timestamp.is_some() {
-                last_timestamp = entry.timestamp.clone();
-            }
             if let Some(ref payload) = entry.payload {
                 last_payload_type = payload.r#type.clone();
                 last_role = payload.role.clone();
                 // Track user messages.
-                if payload.r#type.as_deref() == Some("user_message") {
-                    if let Some(ref text) = payload.text {
+                if payload.r#type.as_deref() == Some("user_message")
+                    && let Some(ref text) = payload.text {
                         last_user_message = Some(text.clone());
                     }
-                }
-                if payload.role.as_deref() == Some("user") {
-                    if let Some(ref text) = payload.text {
+                if payload.role.as_deref() == Some("user")
+                    && let Some(ref text) = payload.text {
                         last_user_message = Some(text.clone());
                     }
-                }
                 // Track assistant reply text.
-                if payload.r#type.as_deref() == Some("agent_message")
-                    || payload.role.as_deref() == Some("assistant")
-                {
-                    if let Some(ref text) = payload.text {
+                if (payload.r#type.as_deref() == Some("agent_message")
+                    || payload.role.as_deref() == Some("assistant"))
+                    && let Some(ref text) = payload.text {
                         last_assistant_text = Some(text.clone());
                     }
-                }
             }
         }
     }
@@ -303,7 +225,6 @@ fn detect_codex_status(session_file: &Path) -> Option<DetectedStatus> {
 
     Some(DetectedStatus {
         status,
-        timestamp: last_timestamp,
         last_prompt: last_user_message,
         last_reply: last_assistant_text,
     })
@@ -341,11 +262,11 @@ fn discover_codex_projects() -> Vec<String> {
                 };
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if !path.extension().is_some_and(|e| e == "jsonl") {
+                    if path.extension().is_none_or(|e| e != "jsonl") {
                         continue;
                     }
-                    if let Some(cwd) = extract_cwd(&path) {
-                        if seen.insert(cwd.clone()) {
+                    if let Some(cwd) = extract_cwd(&path)
+                        && seen.insert(cwd.clone()) {
                             let modified = entry
                                 .metadata()
                                 .ok()
@@ -356,7 +277,6 @@ fn discover_codex_projects() -> Vec<String> {
                                 break 'outer;
                             }
                         }
-                    }
                 }
             }
         }
@@ -390,7 +310,6 @@ fn extract_cwd(path: &Path) -> Option<String> {
 #[derive(Deserialize)]
 struct CodexEntry {
     r#type: Option<String>,
-    timestamp: Option<String>,
     payload: Option<CodexPayload>,
 }
 

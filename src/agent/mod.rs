@@ -47,7 +47,6 @@ impl AgentKind {
 
 pub struct DetectedStatus {
     pub status: SessionStatus,
-    pub timestamp: Option<String>,
     pub last_prompt: Option<String>,
     /// Last assistant reply text (truncated snippet for notifications).
     pub last_reply: Option<String>,
@@ -61,12 +60,8 @@ pub trait Agent: Send + Sync {
         vec![]
     }
 
-    /// List all session files for a given cwd (used for snapshot before session creation).
+    /// List all session files for a given cwd (used for snapshot and file resolution).
     fn list_session_files(&self, cwd: &str) -> Vec<PathBuf>;
-
-    /// Find the active session file (e.g. JSONL) for status detection.
-    /// `exclude` contains files to skip (pre-existing + already assigned to other sessions).
-    fn find_session_file(&self, cwd: &str, exclude: &[PathBuf]) -> Option<PathBuf>;
 
     /// Detect session status from the session file.
     fn detect_status(&self, session_file: &Path) -> Option<DetectedStatus>;
@@ -201,10 +196,8 @@ pub fn read_complete_jsonl_tail(path: &Path, tail_bytes: u64) -> Vec<String> {
                 return Vec::new();
             }
         }
-    } else {
-        if file.read_to_end(&mut buf).is_err() {
-            return Vec::new();
-        }
+    } else if file.read_to_end(&mut buf).is_err() {
+        return Vec::new();
     }
 
     let ends_with_newline = buf.last() == Some(&b'\n');

@@ -43,6 +43,9 @@ pub struct SessionEntry {
     /// Agent-side session ID for resume support.
     #[serde(default)]
     pub agent_session_id: Option<String>,
+    /// Unix epoch when this session was created (for birthtime file matching).
+    #[serde(default)]
+    pub created_epoch: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -125,11 +128,10 @@ pub fn append_history(entry: &HistoryEntry) {
         let _ = fs::create_dir_all(parent);
     }
     let tmp = path.with_extension("json.tmp");
-    if let Ok(json) = serde_json::to_string_pretty(&entries) {
-        if fs::write(&tmp, &json).is_ok() {
+    if let Ok(json) = serde_json::to_string_pretty(&entries)
+        && fs::write(&tmp, &json).is_ok() {
             let _ = fs::rename(&tmp, &path);
         }
-    }
 }
 
 pub fn load_history() -> Vec<HistoryEntry> {
@@ -139,7 +141,13 @@ pub fn load_history() -> Vec<HistoryEntry> {
     let Ok(data) = fs::read_to_string(&path) else {
         return vec![];
     };
-    serde_json::from_str(&data).unwrap_or_default()
+    match serde_json::from_str(&data) {
+        Ok(entries) => entries,
+        Err(e) => {
+            eprintln!("chatmux: failed to parse history: {e}");
+            vec![]
+        }
+    }
 }
 
 pub fn save_history(entries: &[HistoryEntry]) {
@@ -148,9 +156,8 @@ pub fn save_history(entries: &[HistoryEntry]) {
         let _ = fs::create_dir_all(parent);
     }
     let tmp = path.with_extension("json.tmp");
-    if let Ok(json) = serde_json::to_string_pretty(entries) {
-        if fs::write(&tmp, &json).is_ok() {
+    if let Ok(json) = serde_json::to_string_pretty(entries)
+        && fs::write(&tmp, &json).is_ok() {
             let _ = fs::rename(&tmp, &path);
         }
-    }
 }

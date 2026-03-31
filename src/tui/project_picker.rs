@@ -57,11 +57,6 @@ impl ProjectPicker {
         }
     }
 
-    pub fn total_items(&self) -> usize {
-        // Filtered recent projects + "Browse..." option.
-        self.filtered_recent_projects().len() + 1
-    }
-
     /// Return recent projects matching the current filter (case-insensitive substring).
     pub fn filtered_recent_projects(&self) -> Vec<String> {
         if self.filter_input.is_empty() {
@@ -186,7 +181,7 @@ impl ProjectPicker {
                 let filtered = self.filtered_recent_projects();
                 if self.selected < filtered.len() {
                     let path = filtered[self.selected].clone();
-                    return self.on_project_selected(path);
+                    self.on_project_selected(path)
                 } else {
                     // Selected "Browse...".
                     self.enter_browser();
@@ -255,15 +250,14 @@ impl ProjectPicker {
 
     /// Go up one directory in browser mode.
     pub fn go_up(&mut self) {
-        if self.mode == PickerMode::DirectoryBrowser {
-            if let Some(parent) = std::path::Path::new(&self.browser_cwd)
+        if self.mode == PickerMode::DirectoryBrowser
+            && let Some(parent) = std::path::Path::new(&self.browser_cwd)
                 .parent()
                 .map(|p| p.to_string_lossy().into_owned())
             {
                 self.browser_cwd = parent;
                 self.refresh_browser();
             }
-        }
     }
 
     /// Go back to recent projects from browser.
@@ -288,11 +282,10 @@ impl ProjectPicker {
 
     /// Shorten a path for display (replace home with ~).
     fn display_path(path: &str) -> String {
-        if let Ok(home) = std::env::var("HOME") {
-            if let Some(rest) = path.strip_prefix(&home) {
+        if let Ok(home) = std::env::var("HOME")
+            && let Some(rest) = path.strip_prefix(&home) {
                 return format!("~{rest}");
             }
-        }
         path.to_string()
     }
 }

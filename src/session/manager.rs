@@ -181,14 +181,6 @@ impl SessionManager {
         self.tmux.resize_pane(&session.name, width, height)
     }
 
-    /// Update session status.
-    pub fn set_status(&mut self, index: usize, status: SessionStatus) {
-        if let Some(session) = self.sessions.get_mut(index) {
-            session.status = status;
-            session.touch_activity();
-        }
-    }
-
     /// Restore sessions from saved state + live tmux sessions.
     /// Only restores sessions whose tmux session is still alive.
     pub fn restore(&mut self) {
@@ -212,7 +204,7 @@ impl SessionManager {
                     session.jsonl_path = entry
                         .session_file
                         .as_ref()
-                        .map(|s| std::path::PathBuf::from(s));
+                        .map(std::path::PathBuf::from);
                     // Restore JSONL file stamp so the poll skips unchanged files.
                     session.jsonl_stamp = entry.jsonl_modified_epoch
                         .map(|epoch| {
@@ -229,6 +221,7 @@ impl SessionManager {
                         session.branch = entry.branch;
                     }
                     session.agent_session_id = entry.agent_session_id;
+                    session.created_epoch = entry.created_epoch;
                     // Restore last activity from saved epoch or JSONL file mtime.
                     let file_epoch = session
                         .jsonl_path
@@ -329,6 +322,7 @@ impl SessionManager {
                     jsonl_len: s.jsonl_stamp.map(|st| st.len),
                     branch: s.branch.clone(),
                     agent_session_id: s.agent_session_id.clone(),
+                    created_epoch: s.created_epoch,
                 })
                 .collect(),
             next_id: self.next_id,

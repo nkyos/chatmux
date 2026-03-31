@@ -253,17 +253,6 @@ impl TmuxClient {
             .unwrap_or(0)
     }
 
-    /// Check if a tmux session is still alive.
-    pub fn has_session(&self, session_name: &str) -> bool {
-        let full_name = format!("{SESSION_PREFIX}{session_name}");
-        Command::new("tmux")
-            .args(["has-session", "-t", &full_name])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
-    }
-
     /// Check if a tmux session has any attached clients.
     /// Returns true if someone is directly attached (e.g. via `chatmux claude`).
     pub fn has_attached_client(&self, session_name: &str) -> bool {

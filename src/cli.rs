@@ -62,6 +62,7 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
         jsonl_len: None,
         branch: detect_git_branch(&cwd),
         agent_session_id: None,
+        created_epoch: Some(now_epoch()),
     });
     state::save(&SavedState {
         sessions,

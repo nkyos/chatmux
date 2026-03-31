@@ -22,58 +22,35 @@ pub struct ProjectSummary {
     pub latest_activity_epoch: u64,
 }
 
+/// Parameters for rendering the session sidebar.
+pub struct SidebarParams<'a> {
+    pub sessions: &'a [Session],
+    pub selected: Option<usize>,
+    pub sidebar_focused: bool,
+    pub theme: &'a ResolvedTheme,
+    pub sort_mode: SortMode,
+    pub filter: Option<&'a str>,
+    pub rename: Option<(usize, &'a str)>,
+    pub visible: &'a [usize],
+    pub title_override: Option<&'a str>,
+}
+
 pub fn render_sidebar(
     frame: &mut Frame,
     area: Rect,
-    sessions: &[Session],
-    selected: Option<usize>,
-    sidebar_focused: bool,
-    theme: &ResolvedTheme,
-    sort_mode: SortMode,
-    filter: Option<&str>,
-    rename: Option<(usize, &str)>,
-    visible: &[usize],
+    params: &SidebarParams,
     list_state: &mut ListState,
 ) {
-    render_sidebar_with_title(
-        frame,
-        area,
-        sessions,
-        selected,
-        sidebar_focused,
-        theme,
-        sort_mode,
-        filter,
-        rename,
-        visible,
-        list_state,
-        None,
-    );
-}
-
-pub fn render_sidebar_with_title(
-    frame: &mut Frame,
-    area: Rect,
-    sessions: &[Session],
-    selected: Option<usize>,
-    sidebar_focused: bool,
-    theme: &ResolvedTheme,
-    sort_mode: SortMode,
-    filter: Option<&str>,
-    rename: Option<(usize, &str)>,
-    visible: &[usize],
-    list_state: &mut ListState,
-    title_override: Option<&str>,
-) {
-    let border_color = if sidebar_focused {
+    let theme = params.theme;
+    let border_color = if params.sidebar_focused {
         theme.border_focused
     } else {
         theme.border_unfocused
     };
 
-    let title = title_override
+    let title = params.title_override
         .map(|t| t.to_string())
-        .unwrap_or_else(|| format!(" Sessions [{}] ", sort_mode.label()));
+        .unwrap_or_else(|| format!(" Sessions [{}] ", params.sort_mode.label()));
 
     let block = Block::default()
         .title(title)
@@ -81,7 +58,7 @@ pub fn render_sidebar_with_title(
         .border_style(Style::default().fg(border_color))
         .padding(Padding::horizontal(1));
 
-    if sessions.is_empty() && filter.is_none() {
+    if params.sessions.is_empty() && params.filter.is_none() {
         let items = vec![ListItem::new(Line::from(vec![
             Span::styled("  Press ", Style::default().fg(Color::DarkGray)),
             Span::styled(
@@ -100,7 +77,7 @@ pub fn render_sidebar_with_title(
     let mut items: Vec<ListItem> = Vec::new();
 
     // Filter bar.
-    if let Some(filter_text) = filter {
+    if let Some(filter_text) = params.filter {
         items.push(ListItem::new(Line::from(vec![
             Span::styled("/ ", Style::default().fg(theme.border_focused)),
             Span::styled(filter_text.to_string(), Style::default().fg(Color::White)),
@@ -109,20 +86,20 @@ pub fn render_sidebar_with_title(
         items.push(ListItem::new(Line::from("")));
     }
 
-    for &idx in visible {
-        let session = &sessions[idx];
-        let is_selected = Some(idx) == selected;
-        let is_renaming = rename.is_some_and(|(ri, _)| ri == idx);
+    for &idx in params.visible {
+        let session = &params.sessions[idx];
+        let is_selected = Some(idx) == params.selected;
+        let is_renaming = params.rename.is_some_and(|(ri, _)| ri == idx);
 
         if is_renaming {
-            let buf = rename.unwrap().1;
+            let buf = params.rename.unwrap().1;
             items.push(session_to_rename_item(session, buf, theme));
         } else {
             items.push(session_to_list_item(session, is_selected, theme));
         }
     }
 
-    if visible.is_empty() && filter.is_some() {
+    if params.visible.is_empty() && params.filter.is_some() {
         items.push(ListItem::new(Line::from(Span::styled(
             "  No matches",
             Style::default().fg(Color::DarkGray),
@@ -130,9 +107,9 @@ pub fn render_sidebar_with_title(
     }
 
     // Calculate which list item index corresponds to the selected session.
-    let selected_item_idx = selected.and_then(|sel| {
-        visible.iter().position(|&i| i == sel).map(|pos| {
-            let offset = if filter.is_some() { 2 } else { 0 };
+    let selected_item_idx = params.selected.and_then(|sel| {
+        params.visible.iter().position(|&i| i == sel).map(|pos| {
+            let offset = if params.filter.is_some() { 2 } else { 0 };
             pos + offset
         })
     });

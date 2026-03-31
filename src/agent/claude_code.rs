@@ -41,39 +41,11 @@ impl Agent for ClaudeCodeAgent {
             .collect()
     }
 
-    fn find_session_file(&self, cwd: &str, exclude: &[PathBuf]) -> Option<PathBuf> {
-        let home = std::env::var("HOME").ok()?;
-        let encoded = encode_project_path(cwd);
-        let project_dir = PathBuf::from(&home)
-            .join(".claude/projects")
-            .join(&encoded);
-
-        if !project_dir.is_dir() {
-            return None;
-        }
-
-        let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
-
-        for entry in fs::read_dir(&project_dir).ok()?.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "jsonl") && !exclude.contains(&path) {
-                if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
-                    if best.as_ref().is_none_or(|(_, t)| modified > *t) {
-                        best = Some((path, modified));
-                    }
-                }
-            }
-        }
-
-        best.map(|(p, _)| p)
-    }
-
     fn detect_status(&self, session_file: &Path) -> Option<DetectedStatus> {
-        let lines = read_complete_jsonl_tail(session_file, 256 * 1024);
+        let lines = read_complete_jsonl_tail(session_file, 1024 * 1024);
 
         let mut last_type: Option<String> = None;
         let mut last_stop_reason: Option<String> = None;
-        let mut last_timestamp: Option<String> = None;
         let mut last_prompt: Option<String> = None;
         let mut last_user_text: Option<String> = None;
         let mut last_assistant_text: Option<String> = None;
@@ -99,34 +71,26 @@ impl Agent for ClaudeCodeAgent {
                 "assistant" => {
                     last_type = Some("assistant".into());
                     last_stop_reason = entry.message.as_ref().and_then(|m| m.stop_reason.clone());
-                    if entry.timestamp.is_some() {
-                        last_timestamp = entry.timestamp;
-                    }
                     // Extract assistant text content for notification snippet.
-                    if let Some(ref msg) = entry.message {
-                        if let Some(ref content) = msg.content {
+                    if let Some(ref msg) = entry.message
+                        && let Some(ref content) = msg.content {
                             let text = extract_assistant_text(content);
                             if !text.is_empty() {
                                 last_assistant_text = Some(text);
                             }
                         }
-                    }
                 }
                 "user" => {
                     last_type = Some("user".into());
                     last_stop_reason = None;
-                    if entry.timestamp.is_some() {
-                        last_timestamp = entry.timestamp;
-                    }
                     // Extract user text content (skip tool_result entries).
-                    if let Some(ref msg) = entry.message {
-                        if let Some(ref content) = msg.content {
+                    if let Some(ref msg) = entry.message
+                        && let Some(ref content) = msg.content {
                             let text = extract_user_text(content);
                             if !text.is_empty() {
                                 last_user_text = Some(text);
                             }
                         }
-                    }
                 }
                 "progress" => {
                     last_type = Some("progress".into());
@@ -157,7 +121,6 @@ impl Agent for ClaudeCodeAgent {
 
         Some(DetectedStatus {
             status,
-            timestamp: last_timestamp,
             last_prompt: prompt,
             last_reply: last_assistant_text,
         })
@@ -194,14 +157,13 @@ impl Agent for ClaudeCodeAgent {
 /// `/Users/nkyos/lab/tools/chatmux` → `-Users-nkyos-lab-tools-chatmux`
 /// Claude Code also replaces underscores with hyphens.
 fn encode_project_path(cwd: &str) -> String {
-    cwd.replace('/', "-").replace('_', "-")
+    cwd.replace(['/', '_'], "-")
 }
 
 #[derive(Deserialize)]
 struct JsonlEntry {
     r#type: Option<String>,
     message: Option<MessagePart>,
-    timestamp: Option<String>,
     /// Present in "last-prompt" type entries.
     #[serde(rename = "lastPrompt")]
     last_prompt: Option<String>,
@@ -221,11 +183,10 @@ fn extract_assistant_text(content: &serde_json::Value) -> String {
             // Collect all text blocks from the assistant message.
             let mut texts = Vec::new();
             for block in blocks {
-                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                         texts.push(text.to_string());
                     }
-                }
             }
             texts.join("\n")
         }
@@ -239,11 +200,10 @@ fn extract_user_text(content: &serde_json::Value) -> String {
         serde_json::Value::String(s) => s.clone(),
         serde_json::Value::Array(blocks) => {
             for block in blocks {
-                if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                    if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
+                if block.get("type").and_then(|t| t.as_str()) == Some("text")
+                    && let Some(text) = block.get("text").and_then(|t| t.as_str()) {
                         return text.to_string();
                     }
-                }
             }
             String::new()
         }

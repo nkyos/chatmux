@@ -86,8 +86,6 @@ pub struct Session {
     pub last_reply: Option<String>,
     /// Current status.
     pub status: SessionStatus,
-    /// When this session was created.
-    pub created_at: Instant,
     /// When the last activity was detected (monotonic, for sorting within a run).
     pub last_activity: Instant,
     /// When the last activity was detected (wall-clock epoch, for display and persistence).
@@ -106,6 +104,9 @@ pub struct Session {
     pub branch: Option<String>,
     /// Agent-side session ID (UUID) for resume support.
     pub agent_session_id: Option<String>,
+    /// Unix epoch when this session was created. Used for birthtime-based
+    /// JSONL file matching when multiple sessions share the same cwd.
+    pub created_epoch: Option<u64>,
 }
 
 impl Session {
@@ -117,6 +118,7 @@ impl Session {
         let branch = detect_git_branch(&cwd);
 
         let now = Instant::now();
+        let epoch = now_epoch();
         Self {
             name,
             cwd,
@@ -126,15 +128,15 @@ impl Session {
             last_prompt: None,
             last_reply: None,
             status: SessionStatus::Read,
-            created_at: now,
             last_activity: now,
-            last_activity_epoch: now_epoch(),
+            last_activity_epoch: epoch,
             jsonl_path: None,
             jsonl_stamp: None,
             pre_existing_files: Vec::new(),
             attached_externally: false,
             branch,
             agent_session_id: None,
+            created_epoch: Some(epoch),
         }
     }
 

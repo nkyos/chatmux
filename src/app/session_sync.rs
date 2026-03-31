@@ -86,9 +86,10 @@ impl App {
             let mut session =
                 crate::session::Session::new(name.clone(), cwd.clone(), agent_kind);
             session.attached_externally = has_client;
+            session.created_epoch = created_epoch;
 
             // For externally discovered sessions, compute pre_existing_files
-            // using the tmux session's creation time. Files modified before the
+            // using the tmux session's creation time. Files created before the
             // session was created cannot belong to this session.
             if let Some(epoch) = created_epoch {
                 let created_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch);
@@ -99,7 +100,7 @@ impl App {
                     .filter(|p| {
                         p.metadata()
                             .ok()
-                            .and_then(|m| m.modified().ok())
+                            .and_then(|m| m.created().or_else(|_| m.modified()).ok())
                             .is_some_and(|t| t < created_time)
                     })
                     .collect();
@@ -170,6 +171,20 @@ impl App {
             .filter_map(|s| s.jsonl_path.clone())
             .collect();
 
+        // Pre-collect pane commands so we can check if agents are still running
+        // without borrowing self.manager immutably inside the mutable loop.
+        let pane_commands: std::collections::HashMap<String, String> = self
+            .manager
+            .sessions()
+            .iter()
+            .filter_map(|s| {
+                self.manager
+                    .tmux()
+                    .get_pane_command(&s.name)
+                    .map(|cmd| (s.name.clone(), cmd))
+            })
+            .collect();
+
         let registry = &self.registry;
         let mut became_working: Option<String> = None;
 
@@ -177,20 +192,31 @@ impl App {
             let agent_adapter = registry.get(session.agent_kind);
 
             // Resolve the session file path.
-            // Re-resolve if not yet found or if the file has been deleted.
-            if session.jsonl_path.is_none()
-                || session
-                    .jsonl_path
-                    .as_ref()
-                    .is_some_and(|p| !p.exists())
+            // Only re-resolve if not yet found or if the file has been deleted.
+            // Uses file birthtime matching to correctly assign files when
+            // multiple sessions share the same working directory.
             {
-                session.jsonl_stamp = None;
-                let mut exclude = session.pre_existing_files.clone();
-                exclude.extend(assigned.iter().cloned());
-                session.jsonl_path = agent_adapter.find_session_file(&session.cwd, &exclude);
-                // Track newly assigned path so subsequent sessions won't claim the same file.
-                if let Some(ref path) = session.jsonl_path {
-                    assigned.push(path.clone());
+                let needs_resolve = session.jsonl_path.is_none()
+                    || session.jsonl_path.as_ref().is_some_and(|p| !p.exists());
+
+                if needs_resolve {
+                    session.jsonl_stamp = None;
+                    session.agent_session_id = None;
+                    let mut exclude = session.pre_existing_files.clone();
+                    for p in &assigned {
+                        exclude.push(p.clone());
+                    }
+                    let found = find_best_session_file(
+                        agent_adapter,
+                        &session.cwd,
+                        &exclude,
+                        session.created_epoch,
+                    );
+                    if let Some(ref path) = found
+                        && !assigned.contains(path) {
+                            assigned.push(path.clone());
+                        }
+                    session.jsonl_path = found;
                 }
             }
 
@@ -199,11 +225,10 @@ impl App {
             session.refresh_branch();
 
             // Extract agent session ID when JSONL is first resolved.
-            if session.agent_session_id.is_none() {
-                if let Some(ref path) = session.jsonl_path {
+            if session.agent_session_id.is_none()
+                && let Some(ref path) = session.jsonl_path {
                     session.agent_session_id = agent_adapter.extract_session_id(path);
                 }
-            }
 
             let Some(ref jsonl_path) = session.jsonl_path else {
                 continue;
@@ -211,44 +236,73 @@ impl App {
 
             // Only re-read if the file has changed (mtime or size).
             let current_stamp = agent::file_stamp(jsonl_path);
-            if current_stamp == session.jsonl_stamp && session.jsonl_stamp.is_some() {
-                continue;
+            let file_changed = current_stamp != session.jsonl_stamp || session.jsonl_stamp.is_none();
+            if file_changed {
+                session.jsonl_stamp = current_stamp;
             }
-            session.jsonl_stamp = current_stamp;
 
-            // Detect status from the session file.
-            if let Some(detected) = agent_adapter.detect_status(jsonl_path) {
-                let old_status = session.status.clone();
-                if old_status != detected.status {
-                    session.status = detected.status.clone();
-                    session.touch_activity();
+            if !file_changed {
+                let agent_running = pane_commands.get(&session.name)
+                    .is_some_and(|cmd| matches!(cmd.as_str(), "claude" | "codex" | "node"));
 
-                    // Track if this session just started working (user sent a prompt).
-                    if detected.status == SessionStatus::Working {
-                        became_working = Some(session.name.clone());
+                // /clear detection: if the agent is still running and we already
+                // had a session ID, look for a single unassigned new file to
+                // switch to. Only check when the file has been stale for a while
+                // to avoid unnecessary directory scans.
+                if agent_running && session.agent_session_id.is_some() {
+                    let stale_enough = session.jsonl_stamp
+                        .and_then(|s| s.modified)
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|elapsed| elapsed > std::time::Duration::from_secs(5));
+                    if stale_enough {
+                        let all_files = agent_adapter.list_session_files(&session.cwd);
+                        let unassigned_new: Vec<std::path::PathBuf> = all_files.into_iter()
+                            .filter(|p| !session.pre_existing_files.contains(p))
+                            .filter(|p| !assigned.contains(p))
+                            .filter(|p| session.jsonl_path.as_ref() != Some(p))
+                            .collect();
+                        if unassigned_new.len() == 1 {
+                            let new_path = unassigned_new.into_iter().next().unwrap();
+                            assigned.push(new_path.clone());
+                            session.jsonl_path = Some(new_path);
+                            session.jsonl_stamp = None;
+                            session.agent_session_id = None;
+                            // Will be picked up on the next poll cycle.
+                            continue;
+                        }
                     }
+                }
 
-                    // Send notification if this status is in the notify list.
+                // Agent exited: if the pane fell back to a shell while status
+                // is Working, the agent exited without writing end_turn.
+                if session.status == SessionStatus::Working && !agent_running {
+                    session.status = SessionStatus::Replied;
+                    session.touch_activity();
                     if notifications_enabled
-                        && notify_statuses.contains(&detected.status.name().to_string())
+                        && notify_statuses.contains(&SessionStatus::Replied.name().to_string())
                     {
                         crate::notify::notify_status(
                             &session.project_name,
-                            &format!("{} {}", session.agent_kind.label(), detected.status.name()),
+                            &format!("{} {}", session.agent_kind.label(), SessionStatus::Replied.name()),
                             &sound,
-                            detected.last_reply.as_deref(),
+                            session.last_reply.as_deref(),
                         );
                     }
                 }
-                // Update last prompt if changed.
-                if detected.last_prompt.is_some() && detected.last_prompt != session.last_prompt {
-                    session.last_prompt = detected.last_prompt;
-                }
-                // Update last reply if changed.
-                if detected.last_reply.is_some() && detected.last_reply != session.last_reply {
-                    session.last_reply = detected.last_reply;
-                }
+                continue;
             }
+
+            // Detect status from the session file.
+            if let Some(detected) = agent_adapter.detect_status(jsonl_path)
+                && let Some(name) = apply_detected_status(
+                    session,
+                    &detected,
+                    notifications_enabled,
+                    &notify_statuses,
+                    &sound,
+                ) {
+                    became_working = Some(name);
+                }
         }
 
         became_working
@@ -276,35 +330,16 @@ impl App {
             // Update the stamp since the file changed.
             session.jsonl_stamp = agent::file_stamp(jsonl_path);
 
-            if let Some(detected) = agent_adapter.detect_status(jsonl_path) {
-                let old_status = session.status.clone();
-                if old_status != detected.status {
-                    session.status = detected.status.clone();
-                    session.touch_activity();
-
-                    // Track if this session just started working (user sent a prompt).
-                    if detected.status == SessionStatus::Working {
-                        became_working = Some(session.name.clone());
-                    }
-
-                    if notifications_enabled
-                        && notify_statuses.contains(&detected.status.name().to_string())
-                    {
-                        crate::notify::notify_status(
-                            &session.project_name,
-                            &format!("{} {}", session.agent_kind.label(), detected.status.name()),
-                            &sound,
-                            detected.last_reply.as_deref(),
-                        );
-                    }
+            if let Some(detected) = agent_adapter.detect_status(jsonl_path)
+                && let Some(name) = apply_detected_status(
+                    session,
+                    &detected,
+                    notifications_enabled,
+                    &notify_statuses,
+                    &sound,
+                ) {
+                    became_working = Some(name);
                 }
-                if detected.last_prompt.is_some() && detected.last_prompt != session.last_prompt {
-                    session.last_prompt = detected.last_prompt;
-                }
-                if detected.last_reply.is_some() && detected.last_reply != session.last_reply {
-                    session.last_reply = detected.last_reply;
-                }
-            }
         }
 
         became_working
@@ -321,7 +356,7 @@ impl App {
             .and_then(|i| self.manager.get(i))
             .map(|s| s.name.clone());
 
-        match self.sort_mode {
+        match self.sidebar.sort_mode {
             SortMode::StatusPriority => {
                 self.manager.sort_by_priority();
             }
@@ -368,7 +403,7 @@ impl App {
 
         let Ok(mut watcher) = watcher else { return };
 
-        if let Some(home) = std::env::var("HOME").ok() {
+        if let Ok(home) = std::env::var("HOME") {
             let claude_dir = std::path::Path::new(&home).join(".claude/projects");
             if claude_dir.is_dir() {
                 let _ = watcher.watch(&claude_dir, RecursiveMode::Recursive);
@@ -381,4 +416,108 @@ impl App {
 
         self._watcher = Some(watcher);
     }
+}
+
+/// Find the best session file by matching file creation time (birthtime)
+/// to the session's creation time. When `created_epoch` is known, the file
+/// whose birthtime is closest to (and after) that time is preferred. This
+/// prevents multi-session cwd conflicts where the "newest by mtime"
+/// heuristic would assign the wrong file.
+///
+/// Falls back to the oldest file by creation time when no epoch is given,
+/// which is safe when sessions are processed in creation order.
+fn find_best_session_file(
+    agent: &dyn crate::agent::Agent,
+    cwd: &str,
+    exclude: &[std::path::PathBuf],
+    created_epoch: Option<u64>,
+) -> Option<std::path::PathBuf> {
+    let all_files = agent.list_session_files(cwd);
+    let candidates: Vec<std::path::PathBuf> = all_files
+        .into_iter()
+        .filter(|p| !exclude.contains(p))
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // If we know when the session was created, prefer the file whose
+    // birthtime is closest to (and after) that time.
+    if let Some(epoch) = created_epoch {
+        let session_time =
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch);
+        let mut best: Option<(std::path::PathBuf, std::time::Duration)> = None;
+        for p in &candidates {
+            if let Ok(meta) = p.metadata() {
+                let file_time = meta.created().or_else(|_| meta.modified()).ok();
+                if let Some(t) = file_time
+                    && let Ok(diff) = t.duration_since(session_time)
+                        && best.as_ref().is_none_or(|(_, d)| diff < *d) {
+                            best = Some((p.clone(), diff));
+                        }
+            }
+        }
+        if let Some((path, _)) = best {
+            return Some(path);
+        }
+    }
+
+    // Fallback: pick the oldest file by creation time.
+    let mut with_time: Vec<(std::path::PathBuf, std::time::SystemTime)> = candidates
+        .into_iter()
+        .filter_map(|p| {
+            let meta = p.metadata().ok()?;
+            let t = meta.created().or_else(|_| meta.modified()).ok()?;
+            Some((p, t))
+        })
+        .collect();
+    with_time.sort_by_key(|(_, t)| *t);
+    with_time.into_iter().next().map(|(p, _)| p)
+}
+
+/// Apply a detected status to a session, sending notifications if configured.
+/// Returns the session name if it just transitioned to Working.
+fn apply_detected_status(
+    session: &mut crate::session::Session,
+    detected: &crate::agent::DetectedStatus,
+    notifications_enabled: bool,
+    notify_statuses: &[String],
+    sound: &str,
+) -> Option<String> {
+    let old_status = session.status.clone();
+    // Skip Read→Replied regression: the user already saw this reply.
+    let is_read_regression = old_status == SessionStatus::Read
+        && detected.status == SessionStatus::Replied;
+
+    let mut became_working = None;
+
+    if old_status != detected.status && !is_read_regression {
+        session.status = detected.status.clone();
+        session.touch_activity();
+
+        if detected.status == SessionStatus::Working {
+            became_working = Some(session.name.clone());
+        }
+
+        if notifications_enabled
+            && notify_statuses.contains(&detected.status.name().to_string())
+        {
+            crate::notify::notify_status(
+                &session.project_name,
+                &format!("{} {}", session.agent_kind.label(), detected.status.name()),
+                sound,
+                detected.last_reply.as_deref(),
+            );
+        }
+    }
+
+    if detected.last_prompt.is_some() && detected.last_prompt != session.last_prompt {
+        session.last_prompt = detected.last_prompt.clone();
+    }
+    if detected.last_reply.is_some() && detected.last_reply != session.last_reply {
+        session.last_reply = detected.last_reply.clone();
+    }
+
+    became_working
 }
