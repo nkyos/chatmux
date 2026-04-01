@@ -1,13 +1,22 @@
 use anyhow::{Context, Result};
+use std::io::Write;
 use std::process::Command;
 
 const SESSION_PREFIX: &str = "chatmux-";
 
-pub struct TmuxClient;
+pub struct TmuxClient {
+    has_direnv: bool,
+}
 
 impl TmuxClient {
     pub fn new() -> Self {
-        Self
+        let has_direnv = Command::new("direnv")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        Self { has_direnv }
     }
 
     /// Create a new tmux session running the given command in the given directory.
@@ -24,6 +33,8 @@ impl TmuxClient {
 
         // Pass command + args as separate arguments so tmux uses direct
         // exec instead of /bin/sh -c, avoiding shell interpretation issues.
+        // If direnv is available, wrap with `direnv exec <cwd>` so that
+        // .envrc environment variables are loaded for the session.
         // Locale env vars are forwarded via `env K=V` prefix.
         let mut cmd = Command::new("tmux");
         cmd.args([
@@ -38,8 +49,11 @@ impl TmuxClient {
             &height.to_string(),
             "-c",
             cwd,
-            "env",
         ]);
+        if self.has_direnv {
+            cmd.args(["direnv", "exec", cwd]);
+        }
+        cmd.arg("env");
         for (key, val) in Self::locale_env_pairs() {
             cmd.arg(format!("{key}={val}"));
         }
@@ -172,6 +186,54 @@ impl TmuxClient {
         if !output.status.success() {
             anyhow::bail!(
                 "tmux send-keys -l failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    /// Paste text into a tmux session via load-buffer/paste-buffer.
+    /// Unlike send_key_literal, this handles arbitrarily long text.
+    pub fn paste_text(&self, session_name: &str, text: &str) -> Result<()> {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let buf_name = "chatmux-paste";
+
+        // Load text into a named tmux buffer via stdin (no arg length limit).
+        let mut child = Command::new("tmux")
+            .args(["load-buffer", "-b", buf_name, "-"])
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .context("Failed to spawn tmux load-buffer")?;
+
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(text.as_bytes())
+            .context("Failed to write to tmux load-buffer stdin")?;
+
+        let output = child
+            .wait_with_output()
+            .context("Failed to wait for tmux load-buffer")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux load-buffer failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
+        // Paste from the buffer into the target pane.
+        let output = Command::new("tmux")
+            .args(["paste-buffer", "-b", buf_name, "-t", &full_name, "-d"])
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .context("Failed to run tmux paste-buffer")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux paste-buffer failed: {}",
                 String::from_utf8_lossy(&output.stderr)
             );
         }

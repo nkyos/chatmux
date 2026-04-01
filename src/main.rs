@@ -55,7 +55,19 @@ fn run_tui() -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = App::new();
-    let result = run_loop(&mut terminal, &mut app);
+
+    // Use catch_unwind so cleanup (including state save) runs even on panic.
+    let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run_loop(&mut terminal, &mut app)
+    })) {
+        Ok(r) => r,
+        Err(payload) => {
+            // Save state before re-raising the panic so sessions can be restored.
+            // Don't call cleanup() — we want to keep tmux sessions alive.
+            app.save_state_for_crash_recovery();
+            std::panic::resume_unwind(payload);
+        }
+    };
 
     app.cleanup();
     let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);

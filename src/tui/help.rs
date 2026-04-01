@@ -29,6 +29,8 @@ fn shortcut_lines(ctx: HelpContext) -> Vec<(&'static str, &'static str)> {
             lines.push(("e", "Open in editor"));
             lines.push(("s", "Cycle sort mode"));
             lines.push(("/", "Filter sessions"));
+            lines.push(("x", "Refresh status"));
+            lines.push(("X", "Re-resolve JSONL"));
             lines.push(("p", "Project view"));
             lines.push(("h", "History"));
             lines.push(("U", "Upgrade + restart all"));

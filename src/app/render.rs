@@ -5,9 +5,10 @@ impl App {
         // Startup screen: full-screen restore prompt.
         if let AppMode::Startup {
             ref existing_sessions,
+            cold_restore,
         } = self.mode
         {
-            render_startup_screen(frame, frame.area(), existing_sessions);
+            render_startup_screen(frame, frame.area(), existing_sessions, cold_restore);
             return;
         }
 
@@ -210,6 +211,19 @@ impl App {
                 }
                 ConfirmAction::RestartAll => {
                     format!("Restart all {} session{}?", n, if n == 1 { "" } else { "s" })
+                }
+                ConfirmAction::DeleteSession { .. } => {
+                    "Delete this session?".to_string()
+                }
+                ConfirmAction::DeleteHistoryEntry { .. } => {
+                    "Delete this history entry?".to_string()
+                }
+                ConfirmAction::OpenEditor { cwd } => {
+                    let dir = std::path::Path::new(cwd)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| cwd.clone());
+                    format!("Open editor in {}?", dir)
                 }
             };
             render_confirm_overlay(frame, frame.area(), &msg);

@@ -6,18 +6,35 @@ use ratatui::{
     Frame,
 };
 
-pub fn render_startup_screen(frame: &mut Frame, area: Rect, session_names: &[String]) {
+pub fn render_startup_screen(
+    frame: &mut Frame,
+    area: Rect,
+    session_names: &[String],
+    cold_restore: bool,
+) {
     let count = session_names.len();
 
     // Build content lines.
     let mut lines = vec![
         Line::from(""),
         Line::from(Span::styled(
-            format!("  {count} existing session(s) found"),
+            if cold_restore {
+                format!("  {count} saved session(s) found")
+            } else {
+                format!("  {count} existing session(s) found")
+            },
             Style::default().fg(Color::Yellow),
         )),
-        Line::from(""),
     ];
+
+    if cold_restore {
+        lines.push(Line::from(Span::styled(
+            "  (will resume agents in new terminals)",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    lines.push(Line::from(""));
 
     // Show session names (up to 8).
     for (i, name) in session_names.iter().take(8).enumerate() {
@@ -41,7 +58,11 @@ pub fn render_startup_screen(frame: &mut Frame, area: Rect, session_names: &[Str
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
         Span::styled("  r", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::raw("  Restore previous sessions"),
+        if cold_restore {
+            Span::raw("  Restore & resume agents")
+        } else {
+            Span::raw("  Restore previous sessions")
+        },
     ]));
     lines.push(Line::from(vec![
         Span::styled("  n", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),

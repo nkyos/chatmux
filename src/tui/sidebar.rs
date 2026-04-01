@@ -18,6 +18,7 @@ pub struct ProjectSummary {
     pub session_count: usize,
     pub has_replied: bool,
     pub has_working: bool,
+    pub has_input: bool,
     pub aggregate_status: SessionStatus,
     pub latest_activity_epoch: u64,
 }
@@ -251,18 +252,25 @@ pub fn render_summary_bar(
     let mut replied = 0u32;
     let mut read = 0u32;
     let mut working = 0u32;
+    let mut input = 0u32;
 
     for s in sessions {
         match s.status {
             SessionStatus::Replied => replied += 1,
             SessionStatus::Read => read += 1,
             SessionStatus::Working => working += 1,
+            SessionStatus::InputRequired => input += 1,
         }
     }
 
     let spans = vec![
         Span::styled(
-            format!(" 🔴{replied}"),
+            format!(" 💬{input}"),
+            Style::default().fg(theme.status_input),
+        ),
+        Span::raw("  "),
+        Span::styled(
+            format!("🔴{replied}"),
             Style::default().fg(theme.status_replied),
         ),
         Span::raw("  "),
@@ -357,6 +365,13 @@ pub fn render_project_list(
                 format!("{} sessions", proj.session_count),
                 Style::default().fg(Color::DarkGray),
             ));
+            if proj.has_input {
+                badges.push(Span::raw("  "));
+                badges.push(Span::styled(
+                    "💬 input",
+                    Style::default().fg(theme.status_input),
+                ));
+            }
             if proj.has_replied {
                 badges.push(Span::raw("  "));
                 badges.push(Span::styled(

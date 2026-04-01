@@ -118,9 +118,9 @@ impl App {
                     if self.focus == Focus::Terminal
                         && let Some(idx) = self.selected
                             && let Some(session) = self.manager.get(idx) {
-                                self.manager
+                                let _ = self.manager
                                     .tmux()
-                                    .send_key_literal(&session.name, &text)?;
+                                    .paste_text(&session.name, &text);
                             }
                 }
                 Event::Mouse(mouse) => {

@@ -186,10 +186,13 @@ impl SessionManager {
     pub fn restore(&mut self) {
         let live: HashSet<String> = self.tmux.list_chatmux_sessions().into_iter().collect();
 
+        let mut restored: HashSet<String> = HashSet::new();
+
         if let Some(saved) = state::load() {
             // Restore from saved state, but only if tmux session is alive.
             for entry in saved.sessions {
                 if live.contains(&entry.name) {
+                    restored.insert(entry.name.clone());
                     let mut session = Session::new(entry.name, entry.cwd, entry.agent_kind);
                     session.project_name = entry.project_name;
                     session.task_label = entry.task_label;
@@ -199,6 +202,7 @@ impl SessionManager {
                     session.status = match entry.status.as_deref() {
                         Some("replied") => SessionStatus::Replied,
                         Some("read") => SessionStatus::Read,
+                        Some("input") => SessionStatus::InputRequired,
                         _ => SessionStatus::Working,
                     };
                     session.jsonl_path = entry
@@ -245,18 +249,21 @@ impl SessionManager {
                 }
             }
             self.next_id = saved.next_id;
-        } else {
-            // No state file — reconstruct from live tmux sessions.
-            // Detect agent kind from tmux pane command.
-            for name in &live {
-                let cwd = self
-                    .tmux
-                    .get_pane_cwd(name)
-                    .unwrap_or_else(|| "/".to_string());
-                let agent_kind = self.detect_agent_from_tmux(name);
-                let session = Session::new(name.clone(), cwd, agent_kind);
-                self.sessions.push(session);
+        }
+
+        // Reconstruct any live tmux sessions not found in saved state
+        // (e.g. created after last save, or state file missing).
+        for name in &live {
+            if restored.contains(name) {
+                continue;
             }
+            let cwd = self
+                .tmux
+                .get_pane_cwd(name)
+                .unwrap_or_else(|| "/".to_string());
+            let agent_kind = self.detect_agent_from_tmux(name);
+            let session = Session::new(name.clone(), cwd, agent_kind);
+            self.sessions.push(session);
         }
 
         // Ensure next_id is higher than any restored session.

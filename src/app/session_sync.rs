@@ -211,6 +211,7 @@ impl App {
                         &session.cwd,
                         &exclude,
                         session.created_epoch,
+                        session.agent_session_id.as_deref(),
                     );
                     if let Some(ref path) = found
                         && !assigned.contains(path) {
@@ -245,37 +246,50 @@ impl App {
                 let agent_running = pane_commands.get(&session.name)
                     .is_some_and(|cmd| matches!(cmd.as_str(), "claude" | "codex" | "node"));
 
-                // /clear detection: if the agent is still running and we already
-                // had a session ID, look for a single unassigned new file to
-                // switch to. Only check when the file has been stale for a while
-                // to avoid unnecessary directory scans.
+                // /clear detection: if the agent is still running but its
+                // JSONL file stopped changing, look for a newer file that is
+                // actively being written to.  Only switch if the candidate was
+                // modified very recently (within 3s), which means it's the file
+                // the agent is currently writing — not a leftover from another
+                // session.  This prevents false switches for idle sessions.
                 if agent_running && session.agent_session_id.is_some() {
-                    let stale_enough = session.jsonl_stamp
-                        .and_then(|s| s.modified)
-                        .and_then(|t| t.elapsed().ok())
-                        .is_some_and(|elapsed| elapsed > std::time::Duration::from_secs(5));
-                    if stale_enough {
-                        let all_files = agent_adapter.list_session_files(&session.cwd);
-                        let unassigned_new: Vec<std::path::PathBuf> = all_files.into_iter()
-                            .filter(|p| !session.pre_existing_files.contains(p))
-                            .filter(|p| !assigned.contains(p))
-                            .filter(|p| session.jsonl_path.as_ref() != Some(p))
-                            .collect();
-                        if unassigned_new.len() == 1 {
-                            let new_path = unassigned_new.into_iter().next().unwrap();
-                            assigned.push(new_path.clone());
-                            session.jsonl_path = Some(new_path);
-                            session.jsonl_stamp = None;
-                            session.agent_session_id = None;
-                            // Will be picked up on the next poll cycle.
-                            continue;
-                        }
+                    let now = std::time::SystemTime::now();
+                    let recency_threshold = std::time::Duration::from_secs(3);
+                    let own_mtime = session.jsonl_stamp.and_then(|s| s.modified);
+
+                    let all_files = agent_adapter.list_session_files(&session.cwd);
+                    let newest = all_files
+                        .into_iter()
+                        .filter(|p| !session.pre_existing_files.contains(p))
+                        .filter(|p| !assigned.contains(p))
+                        .filter(|p| session.jsonl_path.as_ref() != Some(p))
+                        .filter_map(|p| {
+                            let mtime = p.metadata().ok()?.modified().ok()?;
+                            // Must be newer than our current file.
+                            if own_mtime.is_some_and(|own| mtime <= own) {
+                                return None;
+                            }
+                            // Must have been written to recently (actively in use).
+                            if now.duration_since(mtime).ok()? > recency_threshold {
+                                return None;
+                            }
+                            Some((p, mtime))
+                        })
+                        .max_by_key(|(_, mtime)| *mtime)
+                        .map(|(p, _)| p);
+
+                    if let Some(new_path) = newest {
+                        assigned.push(new_path.clone());
+                        session.jsonl_path = Some(new_path);
+                        session.jsonl_stamp = None;
+                        session.agent_session_id = None;
+                        continue;
                     }
                 }
 
                 // Agent exited: if the pane fell back to a shell while status
                 // is Working, the agent exited without writing end_turn.
-                if session.status == SessionStatus::Working && !agent_running {
+                if matches!(session.status, SessionStatus::Working | SessionStatus::InputRequired) && !agent_running {
                     session.status = SessionStatus::Replied;
                     session.touch_activity();
                     if notifications_enabled
@@ -289,6 +303,8 @@ impl App {
                         );
                     }
                 }
+
+
                 continue;
             }
 
@@ -309,6 +325,8 @@ impl App {
     }
 
     /// Poll only sessions whose JSONL file was dirtied by the watcher.
+    /// Only updates status for already-assigned files; file reassignment
+    /// after /clear is handled by the full poll cycle in `poll_session_statuses`.
     /// Returns the name of a session that just transitioned to Working (user sent a prompt).
     pub(super) fn poll_dirty_sessions(&mut self, dirty: &HashSet<PathBuf>) -> Option<String> {
         let notifications_enabled = self.config.notifications.enabled;
@@ -326,8 +344,6 @@ impl App {
             }
 
             let agent_adapter = registry.get(session.agent_kind);
-
-            // Update the stamp since the file changed.
             session.jsonl_stamp = agent::file_stamp(jsonl_path);
 
             if let Some(detected) = agent_adapter.detect_status(jsonl_path)
@@ -418,21 +434,32 @@ impl App {
     }
 }
 
-/// Find the best session file by matching file creation time (birthtime)
-/// to the session's creation time. When `created_epoch` is known, the file
-/// whose birthtime is closest to (and after) that time is preferred. This
-/// prevents multi-session cwd conflicts where the "newest by mtime"
-/// heuristic would assign the wrong file.
+/// Find the best session file for a chatmux session.
 ///
-/// Falls back to the oldest file by creation time when no epoch is given,
-/// which is safe when sessions are processed in creation order.
+/// Resolution order:
+/// 1. Direct match by `agent_session_id` (filename = `{id}.jsonl`) — most reliable.
+/// 2. Birthtime match: file whose creation time is closest to `created_epoch`.
+/// 3. Fallback: oldest file by creation time.
 fn find_best_session_file(
     agent: &dyn crate::agent::Agent,
     cwd: &str,
     exclude: &[std::path::PathBuf],
     created_epoch: Option<u64>,
+    agent_session_id: Option<&str>,
 ) -> Option<std::path::PathBuf> {
     let all_files = agent.list_session_files(cwd);
+
+    // 1. Direct match by agent session ID (most reliable).
+    if let Some(id) = agent_session_id
+        && let Some(path) = all_files.iter().find(|p| {
+            p.file_stem()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s == id)
+        })
+    {
+        return Some(path.clone());
+    }
+
     let candidates: Vec<std::path::PathBuf> = all_files
         .into_iter()
         .filter(|p| !exclude.contains(p))
@@ -442,8 +469,8 @@ fn find_best_session_file(
         return None;
     }
 
-    // If we know when the session was created, prefer the file whose
-    // birthtime is closest to (and after) that time.
+    // 2. Birthtime match: prefer the file whose birthtime is closest to
+    //    (and after) the session's creation time.
     if let Some(epoch) = created_epoch {
         let session_time =
             std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch);
@@ -463,7 +490,7 @@ fn find_best_session_file(
         }
     }
 
-    // Fallback: pick the oldest file by creation time.
+    // 3. Fallback: pick the oldest file by creation time.
     let mut with_time: Vec<(std::path::PathBuf, std::time::SystemTime)> = candidates
         .into_iter()
         .filter_map(|p| {

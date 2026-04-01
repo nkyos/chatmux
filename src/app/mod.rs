@@ -61,7 +61,12 @@ pub(super) enum Focus {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum AppMode {
     /// Startup screen: ask user whether to restore or start fresh.
-    Startup { existing_sessions: Vec<String> },
+    Startup {
+        existing_sessions: Vec<String>,
+        /// True when tmux sessions are gone but saved state exists (e.g. after reboot).
+        /// Restore will recreate tmux sessions using agent resume commands.
+        cold_restore: bool,
+    },
     /// Normal operation.
     Normal,
 }
@@ -78,6 +83,9 @@ pub(super) struct RestartEntry {
 pub(super) enum ConfirmAction {
     UpgradeAndRestart,
     RestartAll,
+    DeleteSession { index: usize },
+    DeleteHistoryEntry { index: usize },
+    OpenEditor { cwd: String },
 }
 
 /// Which view the sidebar is currently showing.
@@ -95,6 +103,8 @@ pub(super) enum SidebarView {
 const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
 /// How often to check the watcher's dirty set for changed files.
 const WATCHER_CHECK_INTERVAL: Duration = Duration::from_millis(300);
+/// How often to auto-save session state to disk (crash recovery).
+const AUTO_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Check if a key event is the prefix key (Ctrl+]).
 /// Legacy terminals send Ctrl+] as Ctrl+5; modern (Kitty protocol) sends Ctrl+].
@@ -184,6 +194,8 @@ pub struct App {
     pub(super) _watcher: Option<notify::RecommendedWatcher>,
     /// Last time we checked the watcher dirty set.
     pub(super) last_watcher_check: Instant,
+    /// Last time we auto-saved session state to disk.
+    pub(super) last_auto_save: Instant,
     /// Pending confirm action (U or R key).
     pub(super) confirm_action: Option<ConfirmAction>,
     /// Snapshot of sessions for restart/upgrade.
@@ -199,12 +211,34 @@ impl App {
         let registry = AgentRegistry::new();
         let manager = SessionManager::new();
         let existing = manager.tmux().list_chatmux_sessions();
-        let mode = if existing.is_empty() {
-            AppMode::Normal
-        } else {
+        let mode = if !existing.is_empty() {
             AppMode::Startup {
                 existing_sessions: existing,
+                cold_restore: false,
             }
+        } else if let Some(saved) = crate::session::state::load() {
+            if saved.sessions.is_empty() {
+                AppMode::Normal
+            } else {
+                // tmux sessions are gone (e.g. after reboot) but saved state exists.
+                let display: Vec<String> = saved
+                    .sessions
+                    .iter()
+                    .map(|e| {
+                        let agent = match e.agent_kind {
+                            AgentKind::ClaudeCode => "claude",
+                            AgentKind::Codex => "codex",
+                        };
+                        format!("{} ({})", e.project_name, agent)
+                    })
+                    .collect();
+                AppMode::Startup {
+                    existing_sessions: display,
+                    cold_restore: true,
+                }
+            }
+        } else {
+            AppMode::Normal
         };
 
         // Build project list from chatmux's own history (no agent file scanning).
@@ -223,7 +257,7 @@ impl App {
             focus: Focus::Sidebar,
             mode,
             should_quit: false,
-            detach_on_quit: false,
+            detach_on_quit: true,
             sidebar: SidebarState::default(),
             terminal: TerminalState::default(),
             picker: None,
@@ -233,6 +267,7 @@ impl App {
             watcher_dirty: Arc::new(Mutex::new(HashSet::new())),
             _watcher: None,
             last_watcher_check: Instant::now(),
+            last_auto_save: Instant::now(),
             confirm_action: None,
             restart_snapshot: Vec::new(),
             upgrading: false,
@@ -348,6 +383,12 @@ impl App {
             }
             self.auto_sort();
         }
+
+        // Periodically auto-save state for crash recovery.
+        if !self.manager.is_empty() && self.last_auto_save.elapsed() >= AUTO_SAVE_INTERVAL {
+            self.last_auto_save = Instant::now();
+            self.manager.save_state();
+        }
     }
 
     /// Build project summaries from current sessions, grouped by cwd.
@@ -363,6 +404,7 @@ impl App {
                     session_count: 0,
                     has_replied: false,
                     has_working: false,
+                    has_input: false,
                     aggregate_status: SessionStatus::Read,
                     latest_activity_epoch: 0,
                 }
@@ -372,13 +414,19 @@ impl App {
                 entry.latest_activity_epoch = session.last_activity_epoch;
             }
             match session.status {
+                SessionStatus::InputRequired => {
+                    entry.has_input = true;
+                    entry.aggregate_status = SessionStatus::InputRequired;
+                }
                 SessionStatus::Replied => {
                     entry.has_replied = true;
-                    entry.aggregate_status = SessionStatus::Replied;
+                    if entry.aggregate_status != SessionStatus::InputRequired {
+                        entry.aggregate_status = SessionStatus::Replied;
+                    }
                 }
                 SessionStatus::Working => {
                     entry.has_working = true;
-                    if entry.aggregate_status != SessionStatus::Replied {
+                    if !matches!(entry.aggregate_status, SessionStatus::InputRequired | SessionStatus::Replied) {
                         entry.aggregate_status = SessionStatus::Working;
                     }
                 }
@@ -550,27 +598,20 @@ impl App {
             }
     }
 
-    /// Auto-focus a session by name when it transitions to Working.
-    /// - If the user is on the Sidebar: select that session and switch to Terminal.
-    /// - If the user is in Terminal and it's the selected session: switch back to Sidebar
-    ///   (the user just sent a message and the agent started working).
+    /// When the selected session transitions to Working while the user is
+    /// viewing it in Terminal, switch back to Sidebar so the user can watch
+    /// other sessions while the agent works.
     fn focus_session_by_name(&mut self, name: &str) {
+        if self.focus != Focus::Terminal {
+            return;
+        }
         let idx = self
             .manager
             .sessions()
             .iter()
             .position(|s| s.name == name);
-
-        if self.focus == Focus::Terminal {
-            // The selected session just started working → return to sidebar.
-            if self.selected == idx {
-                self.focus = Focus::Sidebar;
-            }
-            return;
-        }
-        if let Some(idx) = idx {
-            self.selected = Some(idx);
-            self.focus = Focus::Terminal;
+        if self.selected == idx {
+            self.focus = Focus::Sidebar;
         }
     }
 
@@ -587,6 +628,8 @@ impl App {
         if !self.cached_projects.contains(&path.to_string()) {
             self.cached_projects.insert(0, path.to_string());
         }
+        // Save state immediately so crash recovery has this session.
+        self.manager.save_state();
         Ok(())
     }
 
@@ -804,6 +847,46 @@ impl App {
         match action {
             Some(ConfirmAction::UpgradeAndRestart) => self.do_upgrade_and_restart(),
             Some(ConfirmAction::RestartAll) => self.do_restart_all(),
+            Some(ConfirmAction::DeleteSession { index }) => {
+                self.manager.remove(index)?;
+                // Post-delete UI update depends on current view.
+                match &self.sidebar.view {
+                    SidebarView::ProjectSessions(cwd) => {
+                        let cwd = cwd.clone();
+                        let visible = self.project_session_indices(&cwd);
+                        if visible.is_empty() {
+                            self.selected = None;
+                            self.terminal.content.clear();
+                            self.sidebar.view = SidebarView::Projects;
+                        } else {
+                            self.selected = Some(visible[0]);
+                        }
+                    }
+                    _ => {
+                        if self.manager.is_empty() {
+                            self.selected = None;
+                            self.terminal.content.clear();
+                        } else {
+                            self.selected = Some(index.min(self.manager.len() - 1));
+                        }
+                    }
+                }
+                Ok(())
+            }
+            Some(ConfirmAction::DeleteHistoryEntry { index }) => {
+                if index < self.sidebar.history_entries.len() {
+                    self.sidebar.history_entries.remove(index);
+                    crate::session::state::save_history(&self.sidebar.history_entries);
+                    if !self.sidebar.history_entries.is_empty() {
+                        self.sidebar.history_selected =
+                            self.sidebar.history_selected.min(self.sidebar.history_entries.len() - 1);
+                    }
+                }
+                Ok(())
+            }
+            Some(ConfirmAction::OpenEditor { cwd }) => {
+                self.open_editor(&cwd)
+            }
             None => Ok(()),
         }
     }
@@ -813,14 +896,85 @@ impl App {
         self.manager.len()
     }
 
+    /// Cold-restore sessions from saved state when tmux sessions are gone (e.g. after reboot).
+    /// Creates new tmux sessions using agent resume commands and restores metadata.
+    pub(super) fn cold_restore_sessions(&mut self) -> Result<()> {
+        let Some(saved) = crate::session::state::load() else {
+            return Ok(());
+        };
+
+        let width = self.terminal.area.width.saturating_sub(2);
+        let height = self.terminal.area.height.saturating_sub(2);
+
+        for entry in &saved.sessions {
+            if !std::path::Path::new(&entry.cwd).is_dir() {
+                continue;
+            }
+
+            let agent = self.registry.get(entry.agent_kind);
+            let idx = self.manager.create_resume(
+                &entry.cwd,
+                agent,
+                entry.agent_session_id.as_deref(),
+                width,
+                height,
+            )?;
+
+            if let Some(session) = self.manager.sessions_mut().get_mut(idx) {
+                session.task_label = entry.task_label.clone();
+                session.last_prompt = entry.last_prompt.clone();
+                session.last_reply = entry.last_reply.clone();
+                session.status = match entry.status.as_deref() {
+                    Some("replied") => SessionStatus::Replied,
+                    Some("read") => SessionStatus::Read,
+                    Some("input") => SessionStatus::InputRequired,
+                    _ => SessionStatus::Working,
+                };
+                if entry.branch.is_some() {
+                    session.branch = entry.branch.clone();
+                }
+                if let Some(epoch) = entry.last_activity_epoch {
+                    session.set_activity_from_epoch(epoch);
+                }
+                // Restore created_epoch from saved state for correct JSONL matching.
+                if entry.created_epoch.is_some() {
+                    session.created_epoch = entry.created_epoch;
+                }
+                // Restore JSONL path if the file still exists.
+                if let Some(ref path_str) = entry.session_file {
+                    let path = std::path::PathBuf::from(path_str);
+                    if path.exists() {
+                        session.jsonl_path = Some(path);
+                    }
+                }
+            }
+        }
+
+        self.manager.ensure_next_id(saved.next_id);
+        Ok(())
+    }
+
     pub fn cleanup(&mut self) {
         if self.upgrading {
             let _ = self.manager.tmux().kill_session("upgrade");
+        }
+        // If we quit from the Startup screen without choosing restore or
+        // new, leave tmux sessions and saved state untouched so the user
+        // can restore next time.
+        if matches!(self.mode, AppMode::Startup { .. }) {
+            return;
         }
         if self.detach_on_quit {
             self.manager.detach();
         } else {
             self.manager.cleanup();
+        }
+    }
+
+    /// Save session state without killing sessions (for crash/panic recovery).
+    pub fn save_state_for_crash_recovery(&self) {
+        if !self.manager.is_empty() {
+            self.manager.save_state();
         }
     }
 }

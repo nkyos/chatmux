@@ -81,6 +81,7 @@ pub struct ThemeConfig {
     pub status_working: String,
     pub status_replied: String,
     pub status_read: String,
+    pub status_input: String,
 }
 
 impl Default for ThemeConfig {
@@ -92,6 +93,7 @@ impl Default for ThemeConfig {
             status_working: "blue".into(),
             status_replied: "red".into(),
             status_read: "green".into(),
+            status_input: "yellow".into(),
         }
     }
 }
@@ -104,6 +106,7 @@ pub struct ResolvedTheme {
     pub status_working: Color,
     pub status_replied: Color,
     pub status_read: Color,
+    pub status_input: Color,
 }
 
 impl ResolvedTheme {
@@ -115,6 +118,7 @@ impl ResolvedTheme {
             status_working: parse_color(&theme.status_working),
             status_replied: parse_color(&theme.status_replied),
             status_read: parse_color(&theme.status_read),
+            status_input: parse_color(&theme.status_input),
         }
     }
 }

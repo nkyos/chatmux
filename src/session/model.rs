@@ -15,6 +15,8 @@ pub enum SessionStatus {
     Working,
     Replied,
     Read,
+    /// Agent is waiting for user input (permission prompt, question, etc.).
+    InputRequired,
 }
 
 impl SessionStatus {
@@ -23,14 +25,16 @@ impl SessionStatus {
             Self::Working => "⏳",
             Self::Replied => "🔴",
             Self::Read => "✅",
+            Self::InputRequired => "💬",
         }
     }
 
     pub fn sort_priority(&self) -> u8 {
         match self {
-            Self::Replied => 0,
-            Self::Working => 1,
-            Self::Read => 2,
+            Self::InputRequired => 0,
+            Self::Replied => 1,
+            Self::Working => 2,
+            Self::Read => 3,
         }
     }
 
@@ -39,6 +43,7 @@ impl SessionStatus {
             Self::Working => "working",
             Self::Replied => "replied",
             Self::Read => "read",
+            Self::InputRequired => "input",
         }
     }
 }

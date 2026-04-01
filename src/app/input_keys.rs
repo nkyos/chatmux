@@ -2,18 +2,28 @@ use super::*;
 
 impl App {
     pub(super) fn handle_startup_key(&mut self, code: KeyCode) -> Result<()> {
+        let cold = matches!(self.mode, AppMode::Startup { cold_restore: true, .. });
         match code {
             KeyCode::Char('r') => {
-                // Restore previous sessions.
-                self.manager.restore();
+                if cold {
+                    // Cold restore: recreate tmux sessions from saved state.
+                    self.cold_restore_sessions()?;
+                } else {
+                    // Normal restore from live tmux sessions.
+                    self.manager.restore();
+                }
                 if !self.manager.is_empty() {
                     self.selected = Some(0);
                 }
+                // Save state immediately so crash recovery has current sessions.
+                self.manager.save_state();
                 self.mode = AppMode::Normal;
             }
             KeyCode::Char('n') => {
-                // Start fresh: kill all existing chatmux sessions.
-                self.manager.kill_all_chatmux_sessions();
+                // Start fresh.
+                if !cold {
+                    self.manager.kill_all_chatmux_sessions();
+                }
                 crate::session::state::remove();
                 self.mode = AppMode::Normal;
             }
@@ -61,18 +71,12 @@ impl App {
             KeyCode::Char('e') => {
                 if let Some(idx) = self.selected
                     && let Some(session) = self.manager.get(idx) {
-                        self.open_editor(&session.cwd.clone())?;
+                        self.confirm_action = Some(ConfirmAction::OpenEditor { cwd: session.cwd.clone() });
                     }
             }
             KeyCode::Char('d') => {
                 if let Some(idx) = self.selected {
-                    self.manager.remove(idx)?;
-                    if self.manager.is_empty() {
-                        self.selected = None;
-                        self.terminal.content.clear();
-                    } else {
-                        self.selected = Some(idx.min(self.manager.len() - 1));
-                    }
+                    self.confirm_action = Some(ConfirmAction::DeleteSession { index: idx });
                 }
             }
             KeyCode::Char('r') => {
@@ -97,6 +101,25 @@ impl App {
             KeyCode::Char('p') => {
                 self.sidebar.view = SidebarView::Projects;
                 self.sidebar.project_selected = 0;
+            }
+            KeyCode::Char('x') => {
+                // Force re-read JSONL for selected session (fixes stale status).
+                if let Some(idx) = self.selected
+                    && let Some(session) = self.manager.sessions_mut().get_mut(idx) {
+                        session.jsonl_stamp = None;
+                    }
+                // Trigger immediate poll.
+                self.last_status_poll = Instant::now() - STATUS_POLL_INTERVAL;
+            }
+            KeyCode::Char('X') => {
+                // Force re-resolve JSONL association for selected session.
+                if let Some(idx) = self.selected
+                    && let Some(session) = self.manager.sessions_mut().get_mut(idx) {
+                        session.jsonl_path = None;
+                        session.jsonl_stamp = None;
+                        session.agent_session_id = None;
+                    }
+                self.last_status_poll = Instant::now() - STATUS_POLL_INTERVAL;
             }
             KeyCode::Char('U') => {
                 self.confirm_action = Some(ConfirmAction::UpgradeAndRestart);
@@ -216,15 +239,7 @@ impl App {
                     }
                     KeyCode::Char('d') => {
                         if let Some(idx) = self.selected {
-                            self.manager.remove(idx)?;
-                            let visible = self.project_session_indices(&cwd_owned);
-                            if visible.is_empty() {
-                                self.selected = None;
-                                self.terminal.content.clear();
-                                self.sidebar.view = SidebarView::Projects;
-                            } else {
-                                self.selected = Some(visible[0]);
-                            }
+                            self.confirm_action = Some(ConfirmAction::DeleteSession { index: idx });
                         }
                     }
                     KeyCode::Char('r') => {
@@ -249,7 +264,7 @@ impl App {
                     KeyCode::Char('e') => {
                         if let Some(idx) = self.selected
                             && let Some(session) = self.manager.get(idx) {
-                                self.open_editor(&session.cwd.clone())?;
+                                self.confirm_action = Some(ConfirmAction::OpenEditor { cwd: session.cwd.clone() });
                             }
                     }
                     KeyCode::Char('U') => {
@@ -344,12 +359,7 @@ impl App {
             }
             KeyCode::Char('d') => {
                 if self.sidebar.history_selected < self.sidebar.history_entries.len() {
-                    self.sidebar.history_entries.remove(self.sidebar.history_selected);
-                    crate::session::state::save_history(&self.sidebar.history_entries);
-                    if !self.sidebar.history_entries.is_empty() {
-                        self.sidebar.history_selected =
-                            self.sidebar.history_selected.min(self.sidebar.history_entries.len() - 1);
-                    }
+                    self.confirm_action = Some(ConfirmAction::DeleteHistoryEntry { index: self.sidebar.history_selected });
                 }
             }
             KeyCode::Char('?') => {
@@ -393,7 +403,7 @@ impl App {
                 }
                 _ if is_prefix_key(code, modifiers) => {
                     if let Some(idx) = self.selected {
-                        self.manager.send_keys(idx, "C-]")?;
+                        let _ = self.manager.send_keys(idx, "C-]");
                     }
                     return Ok(());
                 }
@@ -423,12 +433,11 @@ impl App {
                 } else if modifiers.contains(KeyModifiers::ALT) {
                     Some(format!("M-{c}"))
                 } else {
-                    self.manager
-                        .tmux()
-                        .send_key_literal(
-                            &self.manager.get(idx).unwrap().name,
-                            &c.to_string(),
-                        )?;
+                    if let Some(session) = self.manager.get(idx) {
+                        let _ = self.manager
+                            .tmux()
+                            .send_key_literal(&session.name, &c.to_string());
+                    }
                     None
                 }
             }
@@ -447,6 +456,7 @@ impl App {
             KeyCode::Delete => Some("DC".into()),
             KeyCode::Insert => Some("IC".into()),
             KeyCode::F(n) => Some(format!("F{n}")),
+            KeyCode::Esc => Some("Escape".into()),
             _ => None,
         };
 
@@ -462,7 +472,7 @@ impl App {
                     key = format!("S-{key}");
                 }
             }
-            self.manager.send_keys(idx, &key)?;
+            let _ = self.manager.send_keys(idx, &key);
         }
         Ok(())
     }
