@@ -107,6 +107,13 @@ impl Agent for ClaudeCodeAgent {
             return None;
         }
 
+        // /clear and /new reset the session without producing an assistant
+        // response, so they should not leave status as Working.
+        let is_noop_command = last_user_text.as_ref().is_some_and(|t| {
+            t.contains("<command-name>/clear</command-name>")
+                || t.contains("<command-name>/new</command-name>")
+        });
+
         // Prefer the explicit last-prompt entry, fall back to last user text.
         let prompt = last_prompt.or(last_user_text);
 
@@ -115,6 +122,7 @@ impl Agent for ClaudeCodeAgent {
                 Some("end_turn") => SessionStatus::Replied,
                 _ => SessionStatus::Working, // tool_use or streaming (null)
             },
+            Some("user") if is_noop_command => SessionStatus::Read,
             Some("user") | Some("progress") => SessionStatus::Working,
             _ => SessionStatus::Working,
         };
