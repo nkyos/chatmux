@@ -828,16 +828,28 @@ impl App {
 
         let mut commands = Vec::new();
         if kinds.contains(&AgentKind::ClaudeCode) {
-            commands.push(self.config.upgrade.claude_code.clone());
+            commands.push(resolve_upgrade_command(
+                self.config.upgrade.claude_code.as_deref(),
+                "claude-code",
+                "claude",
+                "@anthropic-ai/claude-code",
+                "claude-code",
+            ));
         }
         if kinds.contains(&AgentKind::Codex) {
-            commands.push(self.config.upgrade.codex.clone());
+            commands.push(resolve_upgrade_command(
+                self.config.upgrade.codex.as_deref(),
+                "codex",
+                "codex",
+                "@openai/codex",
+                "codex",
+            ));
         }
 
         if commands.is_empty() {
             "echo 'No agents to upgrade'".into()
         } else {
-            commands.join(" && ")
+            commands.join("\n")
         }
     }
 
@@ -977,4 +989,37 @@ impl App {
             self.manager.save_state();
         }
     }
+}
+
+/// Resolve an upgrade command for a single agent. If the user supplied an
+/// override in config it is used verbatim; otherwise a shell snippet is
+/// generated that detects the install method at runtime and prefers, in order:
+/// mise → Homebrew → npm global.
+fn resolve_upgrade_command(
+    override_cmd: Option<&str>,
+    label: &str,
+    bin: &str,
+    npm_pkg: &str,
+    brew_formula: &str,
+) -> String {
+    if let Some(cmd) = override_cmd {
+        return cmd.to_string();
+    }
+    format!(
+        r#"echo "== Upgrading {label} =="
+if ! command -v {bin} >/dev/null 2>&1; then
+  echo "{bin}: not installed, skipping"
+elif command -v mise >/dev/null 2>&1 && mise which {bin} >/dev/null 2>&1; then
+  echo "-> detected mise"
+  mise upgrade 'npm:{npm_pkg}'
+elif command -v brew >/dev/null 2>&1 && brew list {brew_formula} >/dev/null 2>&1; then
+  echo "-> detected homebrew"
+  brew upgrade {brew_formula}
+elif command -v npm >/dev/null 2>&1; then
+  echo "-> fallback to npm global"
+  npm install -g '{npm_pkg}@latest'
+else
+  echo "{label}: no supported package manager found (mise/brew/npm)"
+fi"#
+    )
 }

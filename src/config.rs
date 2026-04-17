@@ -13,20 +13,13 @@ pub struct Config {
     pub upgrade: UpgradeConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 #[serde(default)]
 pub struct UpgradeConfig {
-    pub claude_code: String,
-    pub codex: String,
-}
-
-impl Default for UpgradeConfig {
-    fn default() -> Self {
-        Self {
-            claude_code: "brew upgrade claude-code".into(),
-            codex: "brew upgrade codex".into(),
-        }
-    }
+    /// Override command for upgrading claude-code. `None` → auto-detect install method.
+    pub claude_code: Option<String>,
+    /// Override command for upgrading codex. `None` → auto-detect install method.
+    pub codex: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
