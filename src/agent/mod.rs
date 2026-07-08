@@ -162,7 +162,7 @@ pub fn file_stamp(path: &Path) -> Option<FileStamp> {
 /// Read complete JSONL lines from the tail of a file.
 /// Incomplete trailing lines (no terminating newline) are discarded to avoid
 /// parsing partially-flushed records. Returns empty Vec on error.
-pub fn read_complete_jsonl_tail(path: &Path, tail_bytes: u64) -> Vec<String> {
+pub(crate) fn read_complete_jsonl_tail(path: &Path, tail_bytes: u64) -> Vec<String> {
     use std::io::{Read, Seek, SeekFrom};
 
     let Ok(mut file) = std::fs::File::open(path) else {
@@ -213,4 +213,79 @@ pub fn read_complete_jsonl_tail(path: &Path, tail_bytes: u64) -> Vec<String> {
     }
 
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn fixture_path(name: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn read_tail_complete_lines() {
+        let lines = read_complete_jsonl_tail(&fixture_path("end_turn.jsonl"), 1024 * 1024);
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("\"user\""));
+        assert!(lines[1].contains("\"last-prompt\""));
+        assert!(lines[2].contains("\"end_turn\""));
+    }
+
+    #[test]
+    fn read_tail_incomplete_trailing_line_discarded() {
+        let lines = read_complete_jsonl_tail(&fixture_path("incomplete_tail.jsonl"), 1024 * 1024);
+        // The last line has no trailing newline, so it should be discarded.
+        // We should get 3 complete lines (user, last-prompt, assistant).
+        assert_eq!(lines.len(), 3);
+        assert!(lines[2].contains("\"end_turn\""));
+    }
+
+    #[test]
+    fn read_tail_empty_file() {
+        let lines = read_complete_jsonl_tail(&fixture_path("empty.jsonl"), 1024 * 1024);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn read_tail_nonexistent_file() {
+        let lines = read_complete_jsonl_tail(Path::new("/nonexistent/file.jsonl"), 1024 * 1024);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn read_tail_small_tail_bytes() {
+        // When tail_bytes is very small, we only get the tail portion.
+        // The function should discard the first partial line from the seek point.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, r#"{{"type":"line1"}}"#).unwrap();
+            writeln!(f, r#"{{"type":"line2"}}"#).unwrap();
+            writeln!(f, r#"{{"type":"line3"}}"#).unwrap();
+        }
+        // Read only last ~20 bytes — should get at most "line3".
+        let lines = read_complete_jsonl_tail(&path, 20);
+        assert!(!lines.is_empty());
+        assert!(lines.last().unwrap().contains("line3"));
+    }
+
+    #[test]
+    fn file_stamp_returns_some_for_existing_file() {
+        let stamp = file_stamp(&fixture_path("end_turn.jsonl"));
+        assert!(stamp.is_some());
+        let s = stamp.unwrap();
+        assert!(s.len > 0);
+        assert!(s.modified.is_some());
+    }
+
+    #[test]
+    fn file_stamp_returns_none_for_missing_file() {
+        let stamp = file_stamp(Path::new("/nonexistent/file.jsonl"));
+        assert!(stamp.is_none());
+    }
 }

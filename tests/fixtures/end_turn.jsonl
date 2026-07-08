@@ -1,0 +1,3 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello, can you help me?"}]}}
+{"type":"last-prompt","lastPrompt":"Hello, can you help me?"}
+{"type":"assistant","message":{"role":"assistant","type":"message","stop_reason":"end_turn","content":[{"type":"text","text":"Sure, I can help you with that."}]}}

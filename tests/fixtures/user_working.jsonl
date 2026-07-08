@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Fix the bug in main.rs"}]}}
+{"type":"last-prompt","lastPrompt":"Fix the bug in main.rs"}

@@ -1,0 +1,4 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Hello"}]}}
+{"type":"last-prompt","lastPrompt":"Hello"}
+{"type":"assistant","message":{"role":"assistant","type":"message","stop_reason":"end_turn","content":[{"type":"text","text":"Hi!"}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"partial wri

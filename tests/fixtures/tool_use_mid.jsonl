@@ -1,0 +1,3 @@
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Read the file src/main.rs"}]}}
+{"type":"last-prompt","lastPrompt":"Read the file src/main.rs"}
+{"type":"assistant","message":{"role":"assistant","type":"message","stop_reason":"tool_use","content":[{"type":"text","text":"Let me read that file."},{"type":"tool_use","id":"toolu_01","name":"Read","input":{"file_path":"src/main.rs"}}]}}

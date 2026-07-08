@@ -201,11 +201,11 @@ impl App {
 
                 if needs_resolve {
                     session.jsonl_stamp = None;
-                    session.agent_session_id = None;
                     let mut exclude = session.pre_existing_files.clone();
                     for p in &assigned {
                         exclude.push(p.clone());
                     }
+                    // Try ID match first with existing agent_session_id.
                     let found = find_best_session_file(
                         agent_adapter,
                         &session.cwd,
@@ -213,6 +213,19 @@ impl App {
                         session.created_epoch,
                         session.agent_session_id.as_deref(),
                     );
+                    // Only clear agent_session_id if the ID match didn't work
+                    // and we fell through to heuristic matching.
+                    if found.is_none()
+                        || session.agent_session_id.as_ref().is_some_and(|id| {
+                            found.as_ref().is_some_and(|p| {
+                                p.file_stem()
+                                    .and_then(|s| s.to_str())
+                                    .is_none_or(|s| s != id.as_str())
+                            })
+                        })
+                    {
+                        session.agent_session_id = None;
+                    }
                     if let Some(ref path) = found
                         && !assigned.contains(path) {
                             assigned.push(path.clone());
@@ -325,8 +338,8 @@ impl App {
     }
 
     /// Poll only sessions whose JSONL file was dirtied by the watcher.
-    /// Only updates status for already-assigned files; file reassignment
-    /// after /clear is handled by the full poll cycle in `poll_session_statuses`.
+    /// Also detects unassigned dirty files (e.g. after /clear) and triggers
+    /// an immediate full poll when found.
     /// Returns the name of a session that just transitioned to Working (user sent a prompt).
     pub(super) fn poll_dirty_sessions(&mut self, dirty: &HashSet<PathBuf>) -> Option<String> {
         let notifications_enabled = self.config.notifications.enabled;
@@ -334,6 +347,15 @@ impl App {
         let sound = self.config.notifications.sound.clone();
         let registry = &self.registry;
         let mut became_working: Option<String> = None;
+
+        let assigned_paths: HashSet<PathBuf> = self
+            .manager
+            .sessions()
+            .iter()
+            .filter_map(|s| s.jsonl_path.clone())
+            .collect();
+
+        let has_unassigned = dirty.iter().any(|p| !assigned_paths.contains(p));
 
         for session in self.manager.sessions_mut() {
             let Some(ref jsonl_path) = session.jsonl_path else {
@@ -356,6 +378,12 @@ impl App {
                 ) {
                     became_working = Some(name);
                 }
+        }
+
+        // If dirty files include paths not assigned to any session,
+        // trigger a full poll immediately to reassign (handles /clear).
+        if has_unassigned {
+            self.last_status_poll = Instant::now() - STATUS_POLL_INTERVAL;
         }
 
         became_working
@@ -547,4 +575,125 @@ fn apply_detected_status(
     }
 
     became_working
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct MockAgent {
+        files: Vec<std::path::PathBuf>,
+    }
+
+    impl crate::agent::Agent for MockAgent {
+        fn kind(&self) -> AgentKind {
+            AgentKind::ClaudeCode
+        }
+        fn command(&self) -> &str {
+            "mock"
+        }
+        fn list_session_files(&self, _cwd: &str) -> Vec<std::path::PathBuf> {
+            self.files.clone()
+        }
+        fn detect_status(
+            &self,
+            _session_file: &std::path::Path,
+        ) -> Option<crate::agent::DetectedStatus> {
+            None
+        }
+        fn discover_projects(&self) -> Vec<String> {
+            vec![]
+        }
+    }
+
+    #[test]
+    fn find_by_session_id_direct_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("abc-123.jsonl");
+        let other = dir.path().join("xyz-456.jsonl");
+        std::fs::File::create(&target).unwrap();
+        std::fs::File::create(&other).unwrap();
+
+        let agent = MockAgent {
+            files: vec![target.clone(), other],
+        };
+
+        let result = find_best_session_file(&agent, "/tmp/test", &[], None, Some("abc-123"));
+        assert_eq!(result, Some(target));
+    }
+
+    #[test]
+    fn find_excludes_pre_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("old.jsonl");
+        let new = dir.path().join("new.jsonl");
+        std::fs::File::create(&old).unwrap();
+        // Small delay to ensure different timestamps.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::File::create(&new).unwrap();
+
+        let agent = MockAgent {
+            files: vec![old.clone(), new.clone()],
+        };
+
+        let result = find_best_session_file(&agent, "/tmp/test", &[old], None, None);
+        assert_eq!(result, Some(new));
+    }
+
+    #[test]
+    fn find_returns_none_when_all_excluded() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("only.jsonl");
+        std::fs::File::create(&f).unwrap();
+
+        let agent = MockAgent {
+            files: vec![f.clone()],
+        };
+
+        let result = find_best_session_file(&agent, "/tmp/test", &[f], None, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_returns_none_when_no_files() {
+        let agent = MockAgent { files: vec![] };
+        let result = find_best_session_file(&agent, "/tmp/test", &[], None, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn find_id_match_ignores_exclude_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("my-id.jsonl");
+        std::fs::File::create(&target).unwrap();
+
+        let agent = MockAgent {
+            files: vec![target.clone()],
+        };
+
+        // Even if the file is in the exclude list, ID match should still find it.
+        let result =
+            find_best_session_file(&agent, "/tmp/test", &[target.clone()], None, Some("my-id"));
+        assert_eq!(result, Some(target));
+    }
+
+    #[test]
+    fn b1_bug_none_session_id_skips_id_match() {
+        // B1 bug: agent_session_id was set to None before being passed to
+        // find_best_session_file. This test verifies that when agent_session_id
+        // is None, the function falls through to birthtime/fallback matching.
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("aaa.jsonl");
+        let f2 = dir.path().join("bbb.jsonl");
+        std::fs::File::create(&f1).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::File::create(&f2).unwrap();
+
+        let agent = MockAgent {
+            files: vec![f1.clone(), f2],
+        };
+
+        // With None session_id, should fall through to birthtime/oldest match.
+        let result = find_best_session_file(&agent, "/tmp/test", &[], None, None);
+        assert!(result.is_some());
+    }
 }

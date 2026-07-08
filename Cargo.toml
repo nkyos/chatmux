@@ -1,6 +1,6 @@
 [package]
 name = "chatmux"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 description = "TUI session manager for AI coding agents"
 license = "MIT"
@@ -17,3 +17,6 @@ dirs = "6"
 base64 = "0.22.1"
 notify = "8.2.0"
 shell-words = "1.1.1"
+
+[dev-dependencies]
+tempfile = "3"

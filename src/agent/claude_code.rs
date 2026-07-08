@@ -162,10 +162,12 @@ impl Agent for ClaudeCodeAgent {
 }
 
 /// Encode a filesystem path to Claude's project directory name.
+/// Every non-ASCII-alphanumeric character becomes `-`.
 /// `/Users/nkyos/lab/tools/chatmux` → `-Users-nkyos-lab-tools-chatmux`
-/// Claude Code also replaces underscores with hyphens.
-fn encode_project_path(cwd: &str) -> String {
-    cwd.replace(['/', '_'], "-")
+pub(crate) fn encode_project_path(cwd: &str) -> String {
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -216,5 +218,125 @@ fn extract_user_text(content: &serde_json::Value) -> String {
             String::new()
         }
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn fixture_path(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn encode_project_path_basic() {
+        assert_eq!(
+            encode_project_path("/Users/nkyos/lab/tools/chatmux"),
+            "-Users-nkyos-lab-tools-chatmux"
+        );
+    }
+
+    #[test]
+    fn encode_project_path_underscores() {
+        assert_eq!(
+            encode_project_path("/Users/nkyos/my_project"),
+            "-Users-nkyos-my-project"
+        );
+    }
+
+    #[test]
+    fn encode_project_path_dots() {
+        assert_eq!(
+            encode_project_path("/Users/nkyos/my.app"),
+            "-Users-nkyos-my-app"
+        );
+    }
+
+    #[test]
+    fn encode_project_path_japanese() {
+        // /事務/経費 → each non-ASCII char and / becomes '-'
+        // / → -, 事 → -, 務 → -, / → -, 経 → -, 費 → - = 6 dashes
+        assert_eq!(
+            encode_project_path("/Users/nkyos/Documents/事務/経費"),
+            "-Users-nkyos-Documents------"
+        );
+    }
+
+    #[test]
+    fn encode_project_path_spaces_and_hyphens() {
+        assert_eq!(
+            encode_project_path("/Users/nkyos/my project-v2"),
+            "-Users-nkyos-my-project-v2"
+        );
+    }
+
+    #[test]
+    fn detect_status_end_turn() {
+        let agent = ClaudeCodeAgent;
+        let result = agent.detect_status(&fixture_path("end_turn.jsonl"));
+        let detected = result.expect("should detect status");
+        assert_eq!(detected.status, SessionStatus::Replied);
+        assert_eq!(
+            detected.last_prompt.as_deref(),
+            Some("Hello, can you help me?")
+        );
+        assert_eq!(
+            detected.last_reply.as_deref(),
+            Some("Sure, I can help you with that.")
+        );
+    }
+
+    #[test]
+    fn detect_status_tool_use_working() {
+        let agent = ClaudeCodeAgent;
+        let result = agent.detect_status(&fixture_path("tool_use_mid.jsonl"));
+        let detected = result.expect("should detect status");
+        assert_eq!(detected.status, SessionStatus::Working);
+        assert_eq!(
+            detected.last_prompt.as_deref(),
+            Some("Read the file src/main.rs")
+        );
+    }
+
+    #[test]
+    fn detect_status_clear_command() {
+        let agent = ClaudeCodeAgent;
+        let result = agent.detect_status(&fixture_path("clear_command.jsonl"));
+        let detected = result.expect("should detect status");
+        assert_eq!(detected.status, SessionStatus::Read);
+    }
+
+    #[test]
+    fn detect_status_empty_file() {
+        let agent = ClaudeCodeAgent;
+        let result = agent.detect_status(&fixture_path("empty.jsonl"));
+        assert!(result.is_none(), "empty file should return None");
+    }
+
+    #[test]
+    fn detect_status_user_working() {
+        let agent = ClaudeCodeAgent;
+        let result = agent.detect_status(&fixture_path("user_working.jsonl"));
+        let detected = result.expect("should detect status");
+        assert_eq!(detected.status, SessionStatus::Working);
+    }
+
+    #[test]
+    fn detect_status_progress_working() {
+        let agent = ClaudeCodeAgent;
+        let result = agent.detect_status(&fixture_path("progress_working.jsonl"));
+        let detected = result.expect("should detect status");
+        assert_eq!(detected.status, SessionStatus::Working);
+    }
+
+    #[test]
+    fn detect_status_nonexistent_file() {
+        let agent = ClaudeCodeAgent;
+        let result = agent.detect_status(&fixture_path("does_not_exist.jsonl"));
+        assert!(result.is_none());
     }
 }
