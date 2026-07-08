@@ -19,6 +19,28 @@ impl Agent for ClaudeCodeAgent {
         vec!["--dangerously-skip-permissions".to_string()]
     }
 
+    fn launch_args(&self, session_id: Option<&str>) -> Vec<String> {
+        match session_id {
+            Some(id) => vec![
+                "--session-id".into(),
+                id.into(),
+                "--dangerously-skip-permissions".into(),
+            ],
+            None => self.args(),
+        }
+    }
+
+    fn session_file_for(&self, cwd: &str, session_id: &str) -> Option<PathBuf> {
+        let home = std::env::var("HOME").ok()?;
+        let encoded = encode_project_path(cwd);
+        Some(
+            PathBuf::from(&home)
+                .join(".claude/projects")
+                .join(&encoded)
+                .join(format!("{session_id}.jsonl")),
+        )
+    }
+
     fn list_session_files(&self, cwd: &str) -> Vec<PathBuf> {
         let Some(home) = std::env::var("HOME").ok() else {
             return Vec::new();
@@ -338,5 +360,29 @@ mod tests {
         let agent = ClaudeCodeAgent;
         let result = agent.detect_status(&fixture_path("does_not_exist.jsonl"));
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn launch_args_with_session_id() {
+        let agent = ClaudeCodeAgent;
+        let args = agent.launch_args(Some("abc-123"));
+        assert_eq!(args, vec!["--session-id", "abc-123", "--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn launch_args_without_session_id() {
+        let agent = ClaudeCodeAgent;
+        let args = agent.launch_args(None);
+        assert_eq!(args, vec!["--dangerously-skip-permissions"]);
+    }
+
+    #[test]
+    fn session_file_for_returns_correct_path() {
+        let agent = ClaudeCodeAgent;
+        let result = agent.session_file_for("/Users/nkyos/lab/tools/chatmux", "test-uuid-123");
+        assert!(result.is_some());
+        let path = result.unwrap();
+        assert!(path.to_string_lossy().contains("-Users-nkyos-lab-tools-chatmux"));
+        assert!(path.to_string_lossy().ends_with("test-uuid-123.jsonl"));
     }
 }

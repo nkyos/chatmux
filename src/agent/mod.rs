@@ -60,6 +60,18 @@ pub trait Agent: Send + Sync {
         vec![]
     }
 
+    /// Args to use when launching with a deterministic session ID.
+    /// Agents that support `--session-id` override this.
+    fn launch_args(&self, _session_id: Option<&str>) -> Vec<String> {
+        self.args()
+    }
+
+    /// Return the expected JSONL path for a given cwd + session ID.
+    /// Agents that support deterministic session IDs override this.
+    fn session_file_for(&self, _cwd: &str, _session_id: &str) -> Option<PathBuf> {
+        None
+    }
+
     /// List all session files for a given cwd (used for snapshot and file resolution).
     fn list_session_files(&self, cwd: &str) -> Vec<PathBuf>;
 

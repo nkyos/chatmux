@@ -192,12 +192,17 @@ impl App {
             let agent_adapter = registry.get(session.agent_kind);
 
             // Resolve the session file path.
-            // Only re-resolve if not yet found or if the file has been deleted.
-            // Uses file birthtime matching to correctly assign files when
-            // multiple sessions share the same working directory.
+            // Resolve the JSONL file path.
+            // Sessions with a deterministic agent_session_id skip heuristic
+            // resolution: the JSONL file may not exist yet (created on first
+            // message), so we wait instead of falling back to guessing.
             {
-                let needs_resolve = session.jsonl_path.is_none()
-                    || session.jsonl_path.as_ref().is_some_and(|p| !p.exists());
+                let has_deterministic_path = session.agent_session_id.is_some()
+                    && session.jsonl_path.is_some();
+
+                let needs_resolve = !has_deterministic_path
+                    && (session.jsonl_path.is_none()
+                        || session.jsonl_path.as_ref().is_some_and(|p| !p.exists()));
 
                 if needs_resolve {
                     session.jsonl_stamp = None;
@@ -205,7 +210,6 @@ impl App {
                     for p in &assigned {
                         exclude.push(p.clone());
                     }
-                    // Try ID match first with existing agent_session_id.
                     let found = find_best_session_file(
                         agent_adapter,
                         &session.cwd,
@@ -213,8 +217,6 @@ impl App {
                         session.created_epoch,
                         session.agent_session_id.as_deref(),
                     );
-                    // Only clear agent_session_id if the ID match didn't work
-                    // and we fell through to heuristic matching.
                     if found.is_none()
                         || session.agent_session_id.as_ref().is_some_and(|id| {
                             found.as_ref().is_some_and(|p| {

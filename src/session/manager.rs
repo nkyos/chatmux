@@ -32,18 +32,27 @@ impl SessionManager {
         width: u16,
         height: u16,
     ) -> Result<usize> {
-        // Snapshot existing session files BEFORE launching the agent.
-        // This lets us later identify which new file belongs to this session.
-        let pre_existing = agent.list_session_files(cwd);
-
         let id = self.next_id;
         self.next_id += 1;
         let name = format!("s{id}");
 
+        let session_uuid = uuid::Uuid::new_v4().to_string();
+        let launch_args = agent.launch_args(Some(&session_uuid));
+        let jsonl_path = agent.session_file_for(cwd, &session_uuid);
+
+        // Only snapshot pre-existing files when deterministic path is unavailable.
+        let pre_existing = if jsonl_path.is_some() {
+            Vec::new()
+        } else {
+            agent.list_session_files(cwd)
+        };
+
         self.tmux
-            .new_session(&name, cwd, agent.command(), &agent.args(), width, height)?;
+            .new_session(&name, cwd, agent.command(), &launch_args, width, height)?;
 
         let mut session = Session::new(name, cwd.to_string(), agent.kind());
+        session.agent_session_id = Some(session_uuid);
+        session.jsonl_path = jsonl_path;
         session.pre_existing_files = pre_existing;
         self.sessions.push(session);
         Ok(self.sessions.len() - 1)
@@ -361,6 +370,10 @@ impl SessionManager {
 
         let mut session = Session::new(name, cwd.to_string(), agent.kind());
         session.agent_session_id = session_id.map(|s| s.to_string());
+        // Set deterministic JSONL path when resuming a known session ID.
+        if let Some(sid) = session_id {
+            session.jsonl_path = agent.session_file_for(cwd, sid);
+        }
         self.sessions.push(session);
         Ok(self.sessions.len() - 1)
     }
