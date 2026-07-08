@@ -37,8 +37,18 @@ impl SessionManager {
         let name = format!("s{id}");
 
         let session_uuid = uuid::Uuid::new_v4().to_string();
-        let launch_args = agent.launch_args(Some(&session_uuid));
+        let mut launch_args = agent.launch_args(Some(&session_uuid));
         let jsonl_path = agent.session_file_for(cwd, &session_uuid);
+
+        // Inject hooks via --settings for Claude Code sessions.
+        if agent.kind() == AgentKind::ClaudeCode
+            && let Ok(hook_script) = crate::hooks::ensure_hook_script()
+        {
+            let _ = crate::hooks::ensure_events_dir();
+            let settings_json = crate::hooks::build_hooks_settings_json(&hook_script);
+            launch_args.push("--settings".into());
+            launch_args.push(settings_json);
+        }
 
         // Only snapshot pre-existing files when deterministic path is unavailable.
         let pre_existing = if jsonl_path.is_some() {
@@ -47,8 +57,14 @@ impl SessionManager {
             agent.list_session_files(cwd)
         };
 
+        let events_dir = crate::hooks::events_dir().to_string_lossy().into_owned();
+        let env_pairs: Vec<(&str, &str)> = vec![
+            ("CHATMUX_SESSION", &name),
+            ("CHATMUX_EVENTS_DIR", &events_dir),
+        ];
+
         self.tmux
-            .new_session(&name, cwd, agent.command(), &launch_args, width, height)?;
+            .new_session_with_env(&name, cwd, agent.command(), &launch_args, width, height, &env_pairs)?;
 
         let mut session = Session::new(name, cwd.to_string(), agent.kind());
         session.agent_session_id = Some(session_uuid);
@@ -359,18 +375,34 @@ impl SessionManager {
         self.next_id += 1;
         let name = format!("s{id}");
 
-        self.tmux.new_session(
+        let mut resume_args = agent.resume_args(session_id);
+        if agent.kind() == AgentKind::ClaudeCode
+            && let Ok(hook_script) = crate::hooks::ensure_hook_script()
+        {
+            let _ = crate::hooks::ensure_events_dir();
+            let settings_json = crate::hooks::build_hooks_settings_json(&hook_script);
+            resume_args.push("--settings".into());
+            resume_args.push(settings_json);
+        }
+
+        let events_dir = crate::hooks::events_dir().to_string_lossy().into_owned();
+        let env_pairs: Vec<(&str, &str)> = vec![
+            ("CHATMUX_SESSION", &name),
+            ("CHATMUX_EVENTS_DIR", &events_dir),
+        ];
+
+        self.tmux.new_session_with_env(
             &name,
             cwd,
             agent.resume_command(),
-            &agent.resume_args(session_id),
+            &resume_args,
             width,
             height,
+            &env_pairs,
         )?;
 
         let mut session = Session::new(name, cwd.to_string(), agent.kind());
         session.agent_session_id = session_id.map(|s| s.to_string());
-        // Set deterministic JSONL path when resuming a known session ID.
         if let Some(sid) = session_id {
             session.jsonl_path = agent.session_file_for(cwd, sid);
         }
@@ -390,13 +422,30 @@ impl SessionManager {
         self.next_id += 1;
         let name = format!("s{id}");
 
-        self.tmux.new_session(
+        let mut picker_args = agent.resume_picker_args();
+        if agent.kind() == AgentKind::ClaudeCode
+            && let Ok(hook_script) = crate::hooks::ensure_hook_script()
+        {
+            let _ = crate::hooks::ensure_events_dir();
+            let settings_json = crate::hooks::build_hooks_settings_json(&hook_script);
+            picker_args.push("--settings".into());
+            picker_args.push(settings_json);
+        }
+
+        let events_dir = crate::hooks::events_dir().to_string_lossy().into_owned();
+        let env_pairs: Vec<(&str, &str)> = vec![
+            ("CHATMUX_SESSION", &name),
+            ("CHATMUX_EVENTS_DIR", &events_dir),
+        ];
+
+        self.tmux.new_session_with_env(
             &name,
             cwd,
             agent.resume_command(),
-            &agent.resume_picker_args(),
+            &picker_args,
             width,
             height,
+            &env_pairs,
         )?;
 
         let session = Session::new(name, cwd.to_string(), agent.kind());
@@ -434,8 +483,11 @@ impl SessionManager {
             };
             state::append_history(&entry);
         }
+        let live_names: Vec<String> =
+            self.sessions.iter().map(|s| s.name.clone()).collect();
         self.kill_all_chatmux_sessions();
         self.sessions.clear();
         state::remove();
+        crate::hooks::cleanup_events(&live_names);
     }
 }

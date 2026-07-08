@@ -1,6 +1,81 @@
 use super::*;
 
 impl App {
+    /// Process hook events from Claude Code for all sessions.
+    /// This is the primary status detection mechanism for Claude sessions.
+    pub(super) fn process_hook_events(&mut self) {
+        let notifications_enabled = self.config.notifications.enabled;
+        let notify_statuses = self.config.notifications.statuses.clone();
+        let sound = self.config.notifications.sound.clone();
+        let mut any_changed = false;
+
+        for session in self.manager.sessions_mut() {
+            let events = crate::hooks::drain_events(&session.name);
+            if events.is_empty() {
+                continue;
+            }
+
+            for event in events {
+                let old_status = session.status.clone();
+                match event.hook_event_name.as_str() {
+                    "SessionStart" => {
+                        if let Some(new_id) = &event.session_id
+                            && session.agent_session_id.as_ref() != Some(new_id)
+                        {
+                            session.agent_session_id = Some(new_id.clone());
+                            let agent = self.registry.get(session.agent_kind);
+                            session.jsonl_path =
+                                agent.session_file_for(&session.cwd, new_id);
+                            session.jsonl_stamp = None;
+                        }
+                    }
+                    "UserPromptSubmit" => {
+                        session.status = SessionStatus::Working;
+                        session.touch_activity();
+                        if let Some(prompt) = &event.prompt {
+                            session.last_prompt = Some(prompt.clone());
+                        }
+                    }
+                    "Stop" => {
+                        session.status = SessionStatus::Replied;
+                        session.touch_activity();
+                        if let Some(reply) = &event.last_assistant_message {
+                            session.last_reply = Some(reply.clone());
+                        }
+                    }
+                    "Notification" => {
+                        session.status = SessionStatus::InputRequired;
+                        session.touch_activity();
+                    }
+                    _ => {}
+                }
+
+                if session.status != old_status {
+                    any_changed = true;
+                    if notifications_enabled
+                        && notify_statuses
+                            .contains(&session.status.name().to_string())
+                    {
+                        crate::notify::notify_status(
+                            &session.project_name,
+                            &format!(
+                                "{} {}",
+                                session.agent_kind.label(),
+                                session.status.name()
+                            ),
+                            &sound,
+                            session.last_reply.as_deref(),
+                        );
+                    }
+                }
+            }
+        }
+
+        if any_changed {
+            self.auto_sort();
+        }
+    }
+
     /// Discover chatmux tmux sessions created externally (e.g. via `chatmux claude`).
     /// Also removes sessions whose tmux session has died.
     pub(super) fn discover_external_sessions(&mut self) {

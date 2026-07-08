@@ -29,16 +29,26 @@ impl TmuxClient {
         width: u16,
         height: u16,
     ) -> Result<()> {
+        self.new_session_with_env(session_name, cwd, command, args, width, height, &[])
+    }
+
+    /// Create a new tmux session with extra environment variables.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_session_with_env(
+        &self,
+        session_name: &str,
+        cwd: &str,
+        command: &str,
+        args: &[String],
+        width: u16,
+        height: u16,
+        extra_env: &[(&str, &str)],
+    ) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
 
-        // Pass command + args as separate arguments so tmux uses direct
-        // exec instead of /bin/sh -c, avoiding shell interpretation issues.
-        // If direnv is available, wrap with `direnv exec <cwd>` so that
-        // .envrc environment variables are loaded for the session.
-        // Locale env vars are forwarded via `env K=V` prefix.
         let mut cmd = Command::new("tmux");
         cmd.args([
-            "-u", // Force UTF-8 mode
+            "-u",
             "new-session",
             "-d",
             "-s",
@@ -50,6 +60,9 @@ impl TmuxClient {
             "-c",
             cwd,
         ]);
+        for (key, val) in extra_env {
+            cmd.args(["-e", &format!("{key}={val}")]);
+        }
         if self.has_direnv {
             cmd.args(["direnv", "exec", cwd]);
         }

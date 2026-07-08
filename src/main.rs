@@ -2,6 +2,7 @@ mod agent;
 mod app;
 mod cli;
 mod config;
+mod hooks;
 mod notify;
 mod projects;
 mod session;

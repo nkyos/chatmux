@@ -99,10 +99,12 @@ pub(super) enum SidebarView {
     ProjectSessions(String),
 }
 
-/// How often to do a full poll of all JSONL files (fallback for watcher misses).
-const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(5);
+/// How often to do a full poll of all JSONL files (fallback for watcher misses / codex).
+const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(30);
 /// How often to check the watcher's dirty set for changed files.
 const WATCHER_CHECK_INTERVAL: Duration = Duration::from_millis(300);
+/// How often to check for hook events from Claude Code.
+const HOOK_EVENT_CHECK_INTERVAL: Duration = Duration::from_millis(300);
 /// How often to auto-save session state to disk (crash recovery).
 const AUTO_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
@@ -196,6 +198,8 @@ pub struct App {
     pub(super) last_watcher_check: Instant,
     /// Last time we auto-saved session state to disk.
     pub(super) last_auto_save: Instant,
+    /// Last time we checked for hook events.
+    pub(super) last_hook_check: Instant,
     /// Pending confirm action (U or R key).
     pub(super) confirm_action: Option<ConfirmAction>,
     /// Snapshot of sessions for restart/upgrade.
@@ -268,6 +272,7 @@ impl App {
             _watcher: None,
             last_watcher_check: Instant::now(),
             last_auto_save: Instant::now(),
+            last_hook_check: Instant::now(),
             confirm_action: None,
             restart_snapshot: Vec::new(),
             upgrading: false,
@@ -358,6 +363,12 @@ impl App {
                     self.terminal.content = content;
                 }
             }
+
+        // Check for hook events from Claude Code (primary status source).
+        if self.last_hook_check.elapsed() >= HOOK_EVENT_CHECK_INTERVAL {
+            self.last_hook_check = Instant::now();
+            self.process_hook_events();
+        }
 
         // Check watcher for dirty JSONL files and poll affected sessions.
         if self.last_watcher_check.elapsed() >= WATCHER_CHECK_INTERVAL {
