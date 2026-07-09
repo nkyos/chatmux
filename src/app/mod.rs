@@ -351,15 +351,28 @@ impl App {
         }
 
         // Resize tmux panes to match the terminal view area.
-        // Skip sessions with an attached external client (e.g. from `chatmux claude`).
+        // Skip sessions that are externally attached or already at the target size.
         let pane_width = self.terminal.area.width.saturating_sub(2);
         let pane_height = self.terminal.area.height.saturating_sub(2);
         if pane_width > 0 && pane_height > 0 {
-            for i in 0..self.manager.len() {
-                if self.manager.get(i).is_some_and(|s| s.attached_externally) {
-                    continue;
+            let target = (pane_width, pane_height);
+            let needs_resize: Vec<usize> = (0..self.manager.len())
+                .filter(|&i| {
+                    self.manager.get(i).is_some_and(|s| {
+                        !s.attached_externally && s.applied_size != Some(target)
+                    })
+                })
+                .collect();
+            let results: Vec<(usize, bool)> = needs_resize
+                .into_iter()
+                .map(|i| (i, self.manager.resize(i, pane_width, pane_height).is_ok()))
+                .collect();
+            for (i, ok) in results {
+                if ok
+                    && let Some(s) = self.manager.sessions_mut().get_mut(i)
+                {
+                    s.applied_size = Some(target);
                 }
-                let _ = self.manager.resize(i, pane_width, pane_height);
             }
         }
 

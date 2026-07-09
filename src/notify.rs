@@ -35,8 +35,19 @@ fn reply_snippet(reply: &str, max_chars: usize) -> String {
 }
 
 /// Send a macOS notification when a session status changes.
-/// `last_reply` is an optional snippet of the agent's reply to show in the notification body.
+/// Runs in a background thread to avoid blocking the UI loop.
 pub fn notify_status(project_name: &str, status: &str, sound: &str, last_reply: Option<&str>) {
+    let project_name = project_name.to_string();
+    let status = status.to_string();
+    let sound = sound.to_string();
+    let last_reply = last_reply.map(|s| s.to_string());
+
+    std::thread::spawn(move || {
+        send_notification(&project_name, &status, &sound, last_reply.as_deref());
+    });
+}
+
+fn send_notification(project_name: &str, status: &str, sound: &str, last_reply: Option<&str>) {
     let subtitle = format!("{project_name}: {status}");
     let body = last_reply
         .map(|r| reply_snippet(r, 120))

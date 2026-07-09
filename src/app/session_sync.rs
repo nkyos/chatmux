@@ -148,6 +148,9 @@ impl App {
             .map(|s| self.manager.tmux().has_attached_client(&s.name))
             .collect();
         for (session, attached) in self.manager.sessions_mut().iter_mut().zip(attach_status) {
+            if session.attached_externally && !attached {
+                session.applied_size = None;
+            }
             session.attached_externally = attached;
         }
     }

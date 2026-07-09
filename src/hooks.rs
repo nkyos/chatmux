@@ -57,17 +57,22 @@ pub fn ensure_events_dir() -> std::io::Result<PathBuf> {
 
 /// Build the --settings JSON string that injects hooks for all lifecycle events.
 pub fn build_hooks_settings_json(hook_script: &Path) -> String {
-    let cmd = hook_script.to_string_lossy();
-    let events = ["SessionStart", "UserPromptSubmit", "Stop", "Notification"];
-    let hooks_entries: Vec<String> = events
-        .iter()
-        .map(|event| {
-            format!(
-                r#""{event}":[{{"hooks":[{{"type":"command","command":"bash {cmd}"}}]}}]"#
-            )
-        })
-        .collect();
-    format!(r#"{{"hooks":{{{}}}}}"#, hooks_entries.join(","))
+    let cmd = format!("bash \"{}\"", hook_script.to_string_lossy());
+    let hook_entry = serde_json::json!([{
+        "hooks": [{
+            "type": "command",
+            "command": cmd,
+        }]
+    }]);
+    let settings = serde_json::json!({
+        "hooks": {
+            "SessionStart": hook_entry,
+            "UserPromptSubmit": hook_entry,
+            "Stop": hook_entry,
+            "Notification": hook_entry,
+        }
+    });
+    settings.to_string()
 }
 
 /// A parsed hook event from Claude Code.
@@ -83,18 +88,8 @@ pub struct HookEvent {
     pub source: Option<String>,
 }
 
-/// Read and drain all pending events for a chatmux session.
-/// Returns events in order, then truncates the file.
-pub fn drain_events(session_name: &str) -> Vec<HookEvent> {
-    let path = events_dir().join(format!("{session_name}.jsonl"));
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) if !c.is_empty() => c,
-        _ => return Vec::new(),
-    };
-
-    // Truncate after reading.
-    let _ = std::fs::write(&path, "");
-
+/// Parse JSONL content into HookEvent entries.
+fn parse_events(content: &str) -> Vec<HookEvent> {
     content
         .lines()
         .filter_map(|line| {
@@ -130,6 +125,34 @@ pub fn drain_events(session_name: &str) -> Vec<HookEvent> {
         .collect()
 }
 
+/// Read and drain all pending events for a chatmux session.
+/// Uses atomic rename to avoid losing events appended between read and truncate.
+pub fn drain_events(session_name: &str) -> Vec<HookEvent> {
+    let dir = events_dir();
+    let path = dir.join(format!("{session_name}.jsonl"));
+    let processing = dir.join(format!("{session_name}.jsonl.processing"));
+
+    // 1. Recover crash remnant from a previous drain.
+    let mut events = Vec::new();
+    if processing.exists() {
+        if let Ok(content) = std::fs::read_to_string(&processing) {
+            events.extend(parse_events(&content));
+        }
+        let _ = std::fs::remove_file(&processing);
+    }
+
+    // 2. Atomically rename the live file so new hook appends go to a fresh file.
+    if std::fs::rename(&path, &processing).is_ok() {
+        // 3. Read the renamed file and delete it.
+        if let Ok(content) = std::fs::read_to_string(&processing) {
+            events.extend(parse_events(&content));
+        }
+        let _ = std::fs::remove_file(&processing);
+    }
+
+    events
+}
+
 fn extract_last_assistant_text(val: &serde_json::Value) -> Option<String> {
     let msg = val.get("last_assistant_message")?;
     // last_assistant_message can be a string or a structured object with content array
@@ -149,7 +172,18 @@ fn extract_last_assistant_text(val: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// Extract the session name from an event filename.
+/// Handles both `{name}.jsonl` and `{name}.jsonl.processing`.
+fn event_file_session_name(path: &std::path::Path) -> Option<String> {
+    let fname = path.file_name()?.to_str()?;
+    fname
+        .strip_suffix(".jsonl.processing")
+        .or_else(|| fname.strip_suffix(".jsonl"))
+        .map(|s| s.to_string())
+}
+
 /// Clean up event files for sessions that no longer exist.
+/// Handles both `.jsonl` and `.jsonl.processing` remnants.
 pub fn cleanup_events(live_sessions: &[String]) {
     let dir = match events_dir().read_dir() {
         Ok(d) => d,
@@ -159,14 +193,61 @@ pub fn cleanup_events(live_sessions: &[String]) {
         live_sessions.iter().map(|s| s.as_str()).collect();
 
     for entry in dir.flatten() {
-        if let Some(name) = entry
-            .path()
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .map(|s| s.to_string())
+        if let Some(name) = event_file_session_name(&entry.path())
             && !live.contains(name.as_str())
         {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_hooks_settings_json_valid() {
+        let path = Path::new("/tmp/hooks/claude-hook.sh");
+        let json = build_hooks_settings_json(path);
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let hooks = val.get("hooks").unwrap();
+        assert!(hooks.get("SessionStart").is_some());
+        assert!(hooks.get("Stop").is_some());
+        let cmd = hooks["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(cmd, "bash \"/tmp/hooks/claude-hook.sh\"");
+    }
+
+    #[test]
+    fn build_hooks_settings_json_path_with_spaces() {
+        let path = Path::new("/tmp/my hooks/claude hook.sh");
+        let json = build_hooks_settings_json(path);
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let cmd = val["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .unwrap();
+        assert_eq!(cmd, "bash \"/tmp/my hooks/claude hook.sh\"");
+    }
+
+    #[test]
+    fn parse_events_basic() {
+        let line = r#"{"hook_event_name":"Stop","session_id":"abc"}"#;
+        let events = parse_events(line);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].hook_event_name, "Stop");
+        assert_eq!(events[0].session_id.as_deref(), Some("abc"));
+    }
+
+    #[test]
+    fn event_file_session_name_jsonl() {
+        let p = Path::new("/tmp/events/s0.jsonl");
+        assert_eq!(event_file_session_name(p), Some("s0".into()));
+    }
+
+    #[test]
+    fn event_file_session_name_processing() {
+        let p = Path::new("/tmp/events/s0.jsonl.processing");
+        assert_eq!(event_file_session_name(p), Some("s0".into()));
     }
 }

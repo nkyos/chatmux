@@ -127,6 +127,9 @@ pub struct Session {
     pub branch: Option<String>,
     /// Agent-side session ID (UUID) for resume support.
     pub agent_session_id: Option<String>,
+    /// Last successfully applied tmux pane size (non-persistent, skip resize when unchanged).
+    #[doc(hidden)]
+    pub applied_size: Option<(u16, u16)>,
 }
 
 impl Session {
@@ -155,6 +158,7 @@ impl Session {
             attached_externally: false,
             branch,
             agent_session_id: None,
+            applied_size: None,
         }
     }
 
@@ -215,25 +219,107 @@ pub fn detect_git_branch(cwd: &str) -> Option<String> {
     let mut dir = Path::new(cwd);
     loop {
         let dot_git = dir.join(".git");
-        let head_path = if dot_git.is_file() {
+        if dot_git.is_file() {
             // Worktree: .git is a file containing "gitdir: <path>"
             let content = std::fs::read_to_string(&dot_git).ok()?;
-            let gitdir = content.trim().strip_prefix("gitdir: ")?;
-            Path::new(gitdir).join("HEAD")
-        } else {
-            dot_git.join("HEAD")
-        };
-        if let Ok(content) = std::fs::read_to_string(&head_path) {
-            let content = content.trim();
-            if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
-                return Some(branch.to_string());
-            }
-            // Detached HEAD — return short hash.
-            if content.len() >= 8 {
-                return Some(content[..8].to_string());
-            }
-            return None;
+            let gitdir_raw = content.trim().strip_prefix("gitdir: ")?;
+            let gitdir = Path::new(gitdir_raw);
+            // Resolve relative gitdir paths against the directory containing .git
+            let gitdir = if gitdir.is_relative() {
+                dir.join(gitdir)
+            } else {
+                gitdir.to_path_buf()
+            };
+            let head_path = gitdir.join("HEAD");
+            return parse_head(&head_path);
+        }
+        let head_path = dot_git.join("HEAD");
+        if let Some(branch) = parse_head(&head_path) {
+            return Some(branch);
         }
         dir = dir.parent()?;
+    }
+}
+
+fn parse_head(head_path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(head_path).ok()?;
+    let content = content.trim();
+    if let Some(branch) = content.strip_prefix("ref: refs/heads/") {
+        return Some(branch.to_string());
+    }
+    // Detached HEAD — return short hash.
+    if content.len() >= 8 {
+        return Some(content[..8].to_string());
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_git_branch_normal_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        std::fs::create_dir_all(git_dir.join("refs/heads")).unwrap();
+        std::fs::write(git_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let branch = detect_git_branch(dir.path().to_str().unwrap());
+        assert_eq!(branch, Some("main".into()));
+    }
+
+    #[test]
+    fn detect_git_branch_worktree_relative_gitdir() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate a worktree: .git is a file pointing to a relative gitdir
+        let worktree_git = dir.path().join("worktree-data");
+        std::fs::create_dir_all(&worktree_git).unwrap();
+        std::fs::write(worktree_git.join("HEAD"), "ref: refs/heads/feature\n").unwrap();
+
+        // .git file with relative path
+        std::fs::write(
+            dir.path().join(".git"),
+            "gitdir: worktree-data\n",
+        )
+        .unwrap();
+
+        let branch = detect_git_branch(dir.path().to_str().unwrap());
+        assert_eq!(branch, Some("feature".into()));
+    }
+
+    #[test]
+    fn detect_git_branch_worktree_absolute_gitdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let gitdir = dir.path().join("abs-gitdir");
+        std::fs::create_dir_all(&gitdir).unwrap();
+        std::fs::write(gitdir.join("HEAD"), "ref: refs/heads/develop\n").unwrap();
+
+        std::fs::write(
+            dir.path().join(".git"),
+            format!("gitdir: {}\n", gitdir.display()),
+        )
+        .unwrap();
+
+        let branch = detect_git_branch(dir.path().to_str().unwrap());
+        assert_eq!(branch, Some("develop".into()));
+    }
+
+    #[test]
+    fn detect_git_branch_worktree_bad_gitdir_no_ascend() {
+        let dir = tempfile::tempdir().unwrap();
+        // Parent has a valid git repo
+        let parent = dir.path().join("parent");
+        std::fs::create_dir_all(parent.join(".git")).unwrap();
+        std::fs::write(parent.join(".git/HEAD"), "ref: refs/heads/parent-branch\n").unwrap();
+
+        // Child has a .git file pointing to a nonexistent gitdir
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join(".git"), "gitdir: nonexistent\n").unwrap();
+
+        // Should NOT ascend to parent — .git file means this IS the repo boundary
+        let branch = detect_git_branch(child.to_str().unwrap());
+        assert_eq!(branch, None);
     }
 }
