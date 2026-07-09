@@ -146,6 +146,15 @@ impl Default for SidebarState {
     }
 }
 
+/// Active search state within the terminal scrollback.
+pub(super) struct SearchState {
+    pub(super) pattern: String,
+    /// Line offsets (from bottom) where matches were found.
+    pub(super) matches: Vec<u16>,
+    /// Current match index within `matches`.
+    pub(super) current: usize,
+}
+
 /// Terminal pane state (content, scroll, selection).
 #[derive(Default)]
 pub(super) struct TerminalState {
@@ -160,6 +169,10 @@ pub(super) struct TerminalState {
     pub(super) prefix_active: bool,
     /// Cached area for pane sizing.
     pub(super) area: Rect,
+    /// Search input buffer (Some while typing a search pattern).
+    pub(super) search_input: Option<String>,
+    /// Active search results.
+    pub(super) search: Option<SearchState>,
 }
 
 

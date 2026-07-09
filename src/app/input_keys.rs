@@ -390,6 +390,55 @@ impl App {
     }
 
     pub(super) fn handle_terminal_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        // Search input mode: typing a pattern.
+        if let Some(ref mut buf) = self.terminal.search_input {
+            match code {
+                KeyCode::Char(c) => {
+                    buf.push(c);
+                    return Ok(());
+                }
+                KeyCode::Backspace => {
+                    buf.pop();
+                    return Ok(());
+                }
+                KeyCode::Enter => {
+                    let pattern = buf.clone();
+                    self.terminal.search_input = None;
+                    if !pattern.is_empty() {
+                        self.execute_search(&pattern);
+                    }
+                    return Ok(());
+                }
+                KeyCode::Esc => {
+                    self.terminal.search_input = None;
+                    return Ok(());
+                }
+                _ => return Ok(()),
+            }
+        }
+
+        // Search results active: n/N/Esc navigate or dismiss.
+        if self.terminal.search.is_some() {
+            match code {
+                KeyCode::Char('n') => {
+                    self.search_next();
+                    return Ok(());
+                }
+                KeyCode::Char('N') => {
+                    self.search_prev();
+                    return Ok(());
+                }
+                KeyCode::Esc => {
+                    self.terminal.search = None;
+                    self.terminal.scroll = 0;
+                    return Ok(());
+                }
+                _ => {
+                    self.terminal.search = None;
+                }
+            }
+        }
+
         // When selection is active, handle copy keys before forwarding to tmux.
         if let Some(sel) = self.terminal.selection
             && sel.start != sel.end {
@@ -428,6 +477,10 @@ impl App {
                 }
                 KeyCode::Char('?') => {
                     self.show_help = true;
+                    return Ok(());
+                }
+                KeyCode::Char('/') => {
+                    self.terminal.search_input = Some(String::new());
                     return Ok(());
                 }
                 _ => return Ok(()),
@@ -494,6 +547,73 @@ impl App {
             let _ = self.manager.send_keys(idx, &key);
         }
         Ok(())
+    }
+
+    /// Execute a scrollback search.
+    fn execute_search(&mut self, pattern: &str) {
+        let Some(idx) = self.selected_index() else {
+            return;
+        };
+        let Ok(history) = self.manager.capture_history_plain(idx) else {
+            return;
+        };
+
+        // Smart-case: case-insensitive if pattern is all lowercase.
+        let case_insensitive = pattern.chars().all(|c| !c.is_uppercase());
+        let pat = if case_insensitive {
+            pattern.to_lowercase()
+        } else {
+            pattern.to_string()
+        };
+
+        let lines: Vec<&str> = history.lines().collect();
+        let total = lines.len();
+        let mut matches: Vec<u16> = Vec::new();
+
+        for (i, line) in lines.iter().enumerate() {
+            let haystack = if case_insensitive {
+                line.to_lowercase()
+            } else {
+                line.to_string()
+            };
+            if haystack.contains(&pat) {
+                let offset_from_bottom = (total - 1 - i) as u16;
+                matches.push(offset_from_bottom);
+            }
+        }
+
+        // matches[0] is the closest to the bottom (most recent).
+        matches.reverse();
+
+        if matches.is_empty() {
+            return;
+        }
+
+        let scroll = matches[0];
+        self.terminal.scroll = scroll;
+        self.terminal.search = Some(super::SearchState {
+            pattern: pattern.to_string(),
+            matches,
+            current: 0,
+        });
+    }
+
+    fn search_next(&mut self) {
+        if let Some(ref mut search) = self.terminal.search
+            && search.current + 1 < search.matches.len()
+        {
+            search.current += 1;
+            self.terminal.scroll = search.matches[search.current];
+        }
+    }
+
+    fn search_prev(&mut self) {
+        if let Some(ref mut search) = self.terminal.search
+            && search.current > 0
+        {
+            search.current -= 1;
+            self.terminal.scroll = search.matches[search.current];
+        }
     }
 
     pub(super) fn handle_picker_key(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {

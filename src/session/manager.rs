@@ -161,6 +161,16 @@ impl SessionManager {
             .capture_pane_scroll(&session.name, scroll_back, pane_height)
     }
 
+    /// Capture full scrollback history as plain text.
+    pub fn capture_history_plain(&self, index: usize) -> Result<String> {
+        let session = self
+            .sessions
+            .get(index)
+            .ok_or_else(|| anyhow::anyhow!("Session index out of range"))?;
+        let history_size = self.tmux.history_size(&session.name);
+        self.tmux.capture_history_plain(&session.name, history_size)
+    }
+
     /// Get the scrollback history size for a session.
     pub fn history_size(&self, index: usize) -> u16 {
         self.sessions

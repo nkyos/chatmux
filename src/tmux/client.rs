@@ -427,6 +427,33 @@ impl TmuxClient {
         None
     }
 
+    /// Capture the full scrollback history as plain text (no ANSI escapes).
+    pub fn capture_history_plain(&self, session_name: &str, history_lines: u16) -> Result<String> {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let start = -(history_lines as i32);
+        let output = Command::new("tmux")
+            .args([
+                "capture-pane",
+                "-p",
+                "-S",
+                &start.to_string(),
+                "-E",
+                "-1",
+                "-t",
+                &full_name,
+            ])
+            .output()
+            .context("Failed to run tmux capture-pane for history")?;
+
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux capture-pane (history) failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
     /// Resize the tmux pane to match the terminal view area.
     pub fn resize_pane(&self, session_name: &str, width: u16, height: u16) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");

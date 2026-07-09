@@ -138,10 +138,17 @@ impl App {
                     let mut label = if self.terminal.scroll > 0 {
                         format!("{base} [scroll: -{}]", self.terminal.scroll)
                     } else {
-                        base
+                        base.clone()
                     };
                     if self.terminal.prefix_active {
                         label.push_str(" [C-] ...]");
+                    }
+                    if let Some(ref buf) = self.terminal.search_input {
+                        label = format!("{base} [/{buf}▎]");
+                    } else if let Some(ref search) = self.terminal.search {
+                        let i = search.current + 1;
+                        let total = search.matches.len();
+                        label = format!("{base} [/{} ({i}/{total})]", search.pattern);
                     }
                     label
                 });
