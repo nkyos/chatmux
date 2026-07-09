@@ -1,11 +1,16 @@
 use super::*;
 
 impl App {
+    pub(super) fn agent_opts(&self, kind: AgentKind) -> crate::agent::AgentLaunchOpts {
+        crate::agent::AgentLaunchOpts::from_config(&self.config.agents, kind)
+    }
+
     pub(super) fn create_session(&mut self, path: &str, agent_kind: AgentKind) -> Result<()> {
         let agent = self.registry.get(agent_kind);
+        let opts = self.agent_opts(agent_kind);
         let width = self.terminal.area.width.saturating_sub(2);
         let height = self.terminal.area.height.saturating_sub(2);
-        let idx = self.manager.create(path, agent, width, height)?;
+        let idx = self.manager.create(path, agent, width, height, &opts)?;
         self.select_by_index(idx);
         self.picker = None;
         self.focus = Focus::Terminal;
@@ -112,12 +117,14 @@ impl App {
             }
 
             let agent = self.registry.get(entry.agent_kind);
+            let opts = self.agent_opts(entry.agent_kind);
             let idx = self.manager.create_resume(
                 &entry.cwd,
                 agent,
                 entry.agent_session_id.as_deref(),
                 width,
                 height,
+                &opts,
             )?;
 
             if let Some(session) = self.manager.sessions_mut().get_mut(idx) {

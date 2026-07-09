@@ -3,4 +3,4 @@ pub mod model;
 pub mod state;
 
 pub use manager::SessionManager;
-pub use model::{Session, SessionStatus, SortMode};
+pub use model::{DetectionSource, Session, SessionStatus, SortMode};

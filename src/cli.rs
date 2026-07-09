@@ -19,6 +19,9 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
     let registry = AgentRegistry::new();
     let agent = registry.get(kind);
 
+    // Parse --label <text> before passing remaining args to the agent.
+    let (task_label, agent_args) = parse_label_arg(extra_args);
+
     // Use a UUID-based name to avoid next_id contention with the TUI.
     let short_uuid = &uuid::Uuid::new_v4().to_string()[..8];
     let name = format!("x{short_uuid}");
@@ -29,7 +32,7 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
     let jsonl_path = agent.session_file_for(&cwd, &session_uuid);
 
     let mut args = agent.launch_args(Some(&session_uuid));
-    args.extend(extra_args.iter().cloned());
+    args.extend(agent_args.iter().cloned());
 
     // Build command args list: env K=V ... command [args...]
     // Using separate arguments avoids shell interpretation (/bin/sh -c).
@@ -53,7 +56,7 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
         agent_kind: kind,
         agent_session_id: Some(session_uuid),
         session_file: jsonl_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
-        task_label: None,
+        task_label: task_label.clone(),
         created_epoch: now_epoch(),
         branch: detect_git_branch(&cwd),
     };
@@ -72,4 +75,19 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
     tmux.args([";", "set", "mouse", "on", ";", "set", "history-limit", "50000"]);
     let err = tmux.exec();
     Err(anyhow::anyhow!("Failed to exec tmux: {err}"))
+}
+
+/// Extract `--label <text>` from the argument list, returning (label, remaining_args).
+fn parse_label_arg(args: &[String]) -> (Option<String>, Vec<String>) {
+    let mut label = None;
+    let mut remaining = Vec::new();
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        if arg == "--label" {
+            label = iter.next().cloned();
+        } else {
+            remaining.push(arg.clone());
+        }
+    }
+    (label, remaining)
 }

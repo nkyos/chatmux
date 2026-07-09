@@ -70,6 +70,23 @@ impl FromStr for SessionStatus {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetectionSource {
+    Unknown,
+    Hooks,
+    Polling,
+}
+
+impl DetectionSource {
+    pub fn indicator(&self) -> &str {
+        match self {
+            Self::Hooks => "⚡",
+            Self::Polling => "~",
+            Self::Unknown => "",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortMode {
     StatusPriority,
     LastActivity,
@@ -130,6 +147,8 @@ pub struct Session {
     /// Last successfully applied tmux pane size (non-persistent, skip resize when unchanged).
     #[doc(hidden)]
     pub applied_size: Option<(u16, u16)>,
+    /// How this session's status is being detected (non-persistent).
+    pub detection_source: DetectionSource,
 }
 
 impl Session {
@@ -159,6 +178,7 @@ impl Session {
             branch,
             agent_session_id: None,
             applied_size: None,
+            detection_source: DetectionSource::Unknown,
         }
     }
 

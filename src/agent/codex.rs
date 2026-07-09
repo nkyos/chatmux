@@ -20,6 +20,15 @@ impl Agent for CodexAgent {
         vec!["--yolo".to_string()]
     }
 
+    fn launch_args_with_opts(&self, _session_id: Option<&str>, opts: &super::AgentLaunchOpts) -> Vec<String> {
+        let mut args = Vec::new();
+        if opts.skip_permissions {
+            args.push("--yolo".into());
+        }
+        args.extend(opts.extra_args.iter().cloned());
+        args
+    }
+
     fn list_session_files(&self, cwd: &str) -> Vec<PathBuf> {
         let Some(home) = std::env::var("HOME").ok() else {
             return Vec::new();
@@ -69,6 +78,18 @@ impl Agent for CodexAgent {
                 "--dangerously-bypass-approvals-and-sandbox".into(),
             ],
         }
+    }
+
+    fn resume_args_with_opts(&self, session_id: Option<&str>, opts: &super::AgentLaunchOpts) -> Vec<String> {
+        let mut args = match session_id {
+            Some(id) => vec!["resume".into(), id.into()],
+            None => vec!["resume".into(), "--last".into()],
+        };
+        if opts.skip_permissions {
+            args.push("--dangerously-bypass-approvals-and-sandbox".into());
+        }
+        args.extend(opts.extra_args.iter().cloned());
+        args
     }
 
     fn resume_picker_args(&self) -> Vec<String> {

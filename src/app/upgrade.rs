@@ -31,12 +31,14 @@ impl App {
 
         for entry in snapshot {
             let agent = self.registry.get(entry.agent_kind);
+            let opts = self.agent_opts(entry.agent_kind);
             let idx = self.manager.create_resume(
                 &entry.cwd,
                 agent,
                 entry.agent_session_id.as_deref(),
                 width,
                 height,
+                &opts,
             )?;
             if let Some(ref label) = entry.task_label
                 && let Some(session) = self.manager.sessions_mut().get_mut(idx) {

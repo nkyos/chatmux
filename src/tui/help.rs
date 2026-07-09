@@ -22,6 +22,7 @@ fn shortcut_lines(ctx: HelpContext) -> Vec<(&'static str, &'static str)> {
     match ctx {
         HelpContext::Sessions => {
             lines.push(("j / k", "Move up / down"));
+            lines.push(("J / K", "Reorder (manual sort)"));
             lines.push(("Enter", "Focus terminal"));
             lines.push(("n", "New session"));
             lines.push(("d", "Delete session"));
@@ -37,6 +38,9 @@ fn shortcut_lines(ctx: HelpContext) -> Vec<(&'static str, &'static str)> {
             lines.push(("R", "Restart all sessions"));
             lines.push(("q", "Detach (keep sessions)"));
             lines.push(("Q", "Quit (kill sessions)"));
+            lines.push(("", ""));
+            lines.push(("⚡", "Hooks detection"));
+            lines.push(("~", "Polling detection"));
         }
         HelpContext::Projects => {
             lines.push(("j / k", "Move up / down"));

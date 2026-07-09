@@ -144,8 +144,10 @@ fn session_to_list_item(
 
     let agent_color = session.agent_kind.icon_color();
 
-    // Line 1: agent icon + status icon + project name + elapsed
-    let line1 = Line::from(vec![
+    let detection = session.detection_source.indicator();
+
+    // Line 1: agent icon + status icon + project name + elapsed + detection indicator
+    let mut line1_spans = vec![
         Span::raw(select_indicator.to_string()),
         Span::styled(agent_icon.to_string(), Style::default().fg(agent_color)),
         Span::raw(format!(" {status_icon} ")),
@@ -154,7 +156,14 @@ fn session_to_list_item(
             Style::default().add_modifier(Modifier::BOLD).fg(name_color),
         ),
         Span::styled(format!("  {elapsed}"), Style::default().fg(Color::DarkGray)),
-    ]);
+    ];
+    if !detection.is_empty() {
+        line1_spans.push(Span::styled(
+            format!(" {detection}"),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+    let line1 = Line::from(line1_spans);
 
     // Line 2: task label or last prompt (if available)
     let prompt_text = session

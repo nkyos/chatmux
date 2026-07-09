@@ -15,6 +15,7 @@ impl App {
                 continue;
             }
 
+            session.detection_source = crate::session::DetectionSource::Hooks;
             for event in events {
                 let old_status = session.status.clone();
                 match event.hook_event_name.as_str() {
@@ -415,7 +416,7 @@ impl App {
         // If dirty files include paths not assigned to any session,
         // trigger a full poll immediately to reassign (handles /clear).
         if has_unassigned {
-            self.last_status_poll = Instant::now() - STATUS_POLL_INTERVAL;
+            self.last_status_poll = Instant::now() - self.config.polling.full_interval();
         }
 
         became_working
@@ -541,6 +542,9 @@ fn apply_detected_status(
     if old_status != detected.status && !is_read_regression {
         session.status = detected.status.clone();
         session.touch_activity();
+        if session.detection_source != crate::session::DetectionSource::Hooks {
+            session.detection_source = crate::session::DetectionSource::Polling;
+        }
 
         if detected.status == SessionStatus::Working {
             became_working = Some(session.name.clone());

@@ -11,6 +11,8 @@ pub struct Config {
     pub display: DisplayConfig,
     pub theme: ThemeConfig,
     pub upgrade: UpgradeConfig,
+    pub agents: AgentsConfig,
+    pub polling: PollingConfig,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -20,6 +22,60 @@ pub struct UpgradeConfig {
     pub claude_code: Option<String>,
     /// Override command for upgrading codex. `None` → auto-detect install method.
     pub codex: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct AgentsConfig {
+    /// Append --dangerously-skip-permissions / --yolo flags.
+    pub skip_permissions: bool,
+    pub claude_extra_args: Vec<String>,
+    pub codex_extra_args: Vec<String>,
+}
+
+impl Default for AgentsConfig {
+    fn default() -> Self {
+        Self {
+            skip_permissions: true,
+            claude_extra_args: Vec::new(),
+            codex_extra_args: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default)]
+pub struct PollingConfig {
+    pub full_interval_secs: u64,
+    pub watcher_debounce_ms: u64,
+    pub hook_check_ms: u64,
+    pub auto_save_secs: u64,
+}
+
+impl Default for PollingConfig {
+    fn default() -> Self {
+        Self {
+            full_interval_secs: 30,
+            watcher_debounce_ms: 300,
+            hook_check_ms: 300,
+            auto_save_secs: 30,
+        }
+    }
+}
+
+impl PollingConfig {
+    pub fn full_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.full_interval_secs.max(5))
+    }
+    pub fn watcher_debounce(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.watcher_debounce_ms.max(50))
+    }
+    pub fn hook_check(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.hook_check_ms.max(50))
+    }
+    pub fn auto_save(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.auto_save_secs.max(5))
+    }
 }
 
 #[derive(Debug, Deserialize)]

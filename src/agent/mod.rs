@@ -101,6 +101,34 @@ pub trait Agent: Send + Sync {
     fn resume_picker_args(&self) -> Vec<String> {
         self.args()
     }
+
+    /// Like `launch_args` but applies runtime opts (skip_permissions, extra_args).
+    fn launch_args_with_opts(&self, session_id: Option<&str>, _opts: &AgentLaunchOpts) -> Vec<String> {
+        self.launch_args(session_id)
+    }
+
+    /// Like `resume_args` but applies runtime opts.
+    fn resume_args_with_opts(&self, session_id: Option<&str>, _opts: &AgentLaunchOpts) -> Vec<String> {
+        self.resume_args(session_id)
+    }
+}
+
+/// Runtime options controlling agent launch flags.
+pub struct AgentLaunchOpts {
+    pub skip_permissions: bool,
+    pub extra_args: Vec<String>,
+}
+
+impl AgentLaunchOpts {
+    pub fn from_config(config: &crate::config::AgentsConfig, kind: AgentKind) -> Self {
+        Self {
+            skip_permissions: config.skip_permissions,
+            extra_args: match kind {
+                AgentKind::ClaudeCode => config.claude_extra_args.clone(),
+                AgentKind::Codex => config.codex_extra_args.clone(),
+            },
+        }
+    }
 }
 
 pub struct AgentRegistry {

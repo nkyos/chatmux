@@ -30,6 +30,18 @@ impl Agent for ClaudeCodeAgent {
         }
     }
 
+    fn launch_args_with_opts(&self, session_id: Option<&str>, opts: &super::AgentLaunchOpts) -> Vec<String> {
+        let mut args = match session_id {
+            Some(id) => vec!["--session-id".into(), id.into()],
+            None => vec![],
+        };
+        if opts.skip_permissions {
+            args.push("--dangerously-skip-permissions".into());
+        }
+        args.extend(opts.extra_args.iter().cloned());
+        args
+    }
+
     fn session_file_for(&self, cwd: &str, session_id: &str) -> Option<PathBuf> {
         let home = std::env::var("HOME").ok()?;
         let encoded = encode_project_path(cwd);
@@ -176,6 +188,18 @@ impl Agent for ClaudeCodeAgent {
                 "--dangerously-skip-permissions".into(),
             ],
         }
+    }
+
+    fn resume_args_with_opts(&self, session_id: Option<&str>, opts: &super::AgentLaunchOpts) -> Vec<String> {
+        let mut args = match session_id {
+            Some(id) => vec!["--resume".into(), id.into()],
+            None => vec!["--continue".into()],
+        };
+        if opts.skip_permissions {
+            args.push("--dangerously-skip-permissions".into());
+        }
+        args.extend(opts.extra_args.iter().cloned());
+        args
     }
 
     fn resume_picker_args(&self) -> Vec<String> {

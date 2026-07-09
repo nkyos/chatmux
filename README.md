@@ -34,10 +34,10 @@ cargo install --path .
 chatmux
 
 # Launch a new Claude Code session directly
-chatmux claude [args...]
+chatmux claude [--label "task description"] [args...]
 
 # Launch a new Codex session directly
-chatmux codex [args...]
+chatmux codex [--label "task description"] [args...]
 ```
 
 ## Keyboard Shortcuts
@@ -47,6 +47,7 @@ chatmux codex [args...]
 | Key | Action |
 |-----|--------|
 | `j` / `k` | Navigate up / down |
+| `J` / `K` | Reorder session (manual sort mode) |
 | `Enter` | Focus terminal |
 | `n` | New session |
 | `d` | Delete session |
@@ -87,6 +88,17 @@ sound = "default"
 [display]
 sidebar_width = 35
 
+[agents]
+skip_permissions = true          # Append --dangerously-skip-permissions / --yolo
+claude_extra_args = []           # Extra args for Claude Code
+codex_extra_args = []            # Extra args for Codex
+
+[polling]
+full_interval_secs = 30          # Full JSONL poll interval
+watcher_debounce_ms = 300        # Filesystem watcher check interval
+hook_check_ms = 300              # Hook event check interval
+auto_save_secs = 30              # Auto-save state interval
+
 [theme]
 border_focused = "cyan"
 border_unfocused = "darkgray"
@@ -103,10 +115,15 @@ status_read = "green"
 
 **Codex sessions** fall back to JSONL file polling since Codex doesn't support hooks.
 
+The sidebar shows a detection indicator next to each session: `⚡` for hooks-based, `~` for polling-based.
+
+**Upstream dependencies:** chatmux reads Claude Code's JSONL files from `~/.claude/projects/<encoded-path>/` and Codex's from `~/.codex/sessions/YYYY/MM/DD/`. It also relies on Claude Code's hook event format (SessionStart, UserPromptSubmit, Stop, Notification). If an agent update changes these file layouts or event formats, status detection may break.
+
 If hooks aren't working, check that:
 - `~/.local/state/chatmux/hooks/claude-hook.sh` exists and is executable
 - The `CHATMUX_SESSION` environment variable is set inside the tmux pane
 - Press `x` in the sidebar to force a status re-read, or `X` to re-resolve the JSONL file
+- Fallback JSONL polling will still work even if hooks are broken
 
 ## License
 

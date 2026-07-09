@@ -101,15 +101,6 @@ pub(super) enum SidebarView {
     ProjectSessions(String),
 }
 
-/// How often to do a full poll of all JSONL files (fallback for watcher misses / codex).
-const STATUS_POLL_INTERVAL: Duration = Duration::from_secs(30);
-/// How often to check the watcher's dirty set for changed files.
-const WATCHER_CHECK_INTERVAL: Duration = Duration::from_millis(300);
-/// How often to check for hook events from Claude Code.
-const HOOK_EVENT_CHECK_INTERVAL: Duration = Duration::from_millis(300);
-/// How often to auto-save session state to disk (crash recovery).
-const AUTO_SAVE_INTERVAL: Duration = Duration::from_secs(30);
-
 /// Check if a key event is the prefix key (Ctrl+]).
 /// Legacy terminals send Ctrl+] as Ctrl+5; modern (Kitty protocol) sends Ctrl+].
 pub(super) fn is_prefix_key(code: KeyCode, modifiers: KeyModifiers) -> bool {
@@ -391,7 +382,7 @@ impl App {
 
         // Check for hook events from Claude Code (primary status source).
         // Also check for pending spool files from CLI-created sessions.
-        if self.last_hook_check.elapsed() >= HOOK_EVENT_CHECK_INTERVAL {
+        if self.last_hook_check.elapsed() >= self.config.polling.hook_check() {
             self.last_hook_check = Instant::now();
             self.process_hook_events();
             if crate::spool::pending_dir().read_dir().is_ok_and(|mut d| d.next().is_some()) {
@@ -401,7 +392,7 @@ impl App {
         }
 
         // Check watcher for dirty JSONL files and poll affected sessions.
-        if self.last_watcher_check.elapsed() >= WATCHER_CHECK_INTERVAL {
+        if self.last_watcher_check.elapsed() >= self.config.polling.watcher_debounce() {
             self.last_watcher_check = Instant::now();
             let dirty: HashSet<PathBuf> = {
                 let mut set = self.watcher_dirty.lock().unwrap_or_else(|e| e.into_inner());
@@ -416,7 +407,7 @@ impl App {
         }
 
         // Periodically do a full poll as fallback (catches watcher misses).
-        if self.last_status_poll.elapsed() >= STATUS_POLL_INTERVAL {
+        if self.last_status_poll.elapsed() >= self.config.polling.full_interval() {
             self.last_status_poll = Instant::now();
             self.discover_external_sessions();
             if let Some(name) = self.poll_session_statuses() {
@@ -426,7 +417,7 @@ impl App {
         }
 
         // Periodically auto-save state for crash recovery.
-        if !self.manager.is_empty() && self.last_auto_save.elapsed() >= AUTO_SAVE_INTERVAL {
+        if !self.manager.is_empty() && self.last_auto_save.elapsed() >= self.config.polling.auto_save() {
             self.last_auto_save = Instant::now();
             self.manager.save_state();
         }

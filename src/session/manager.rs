@@ -1,6 +1,6 @@
 use super::model::{Session, SessionStatus};
 use super::state::{self, SavedState, SessionEntry};
-use crate::agent::{Agent, AgentKind};
+use crate::agent::{Agent, AgentKind, AgentLaunchOpts};
 use crate::tmux::TmuxClient;
 use anyhow::Result;
 use std::collections::HashSet;
@@ -31,13 +31,14 @@ impl SessionManager {
         agent: &dyn Agent,
         width: u16,
         height: u16,
+        opts: &AgentLaunchOpts,
     ) -> Result<usize> {
         let id = self.next_id;
         self.next_id += 1;
         let name = format!("s{id}");
 
         let session_uuid = uuid::Uuid::new_v4().to_string();
-        let mut launch_args = agent.launch_args(Some(&session_uuid));
+        let mut launch_args = agent.launch_args_with_opts(Some(&session_uuid), opts);
         let jsonl_path = agent.session_file_for(cwd, &session_uuid);
 
         // Inject hooks via --settings for Claude Code sessions.
@@ -325,12 +326,13 @@ impl SessionManager {
         session_id: Option<&str>,
         width: u16,
         height: u16,
+        opts: &AgentLaunchOpts,
     ) -> Result<usize> {
         let id = self.next_id;
         self.next_id += 1;
         let name = format!("s{id}");
 
-        let mut resume_args = agent.resume_args(session_id);
+        let mut resume_args = agent.resume_args_with_opts(session_id, opts);
         if agent.kind() == AgentKind::ClaudeCode
             && let Ok(hook_script) = crate::hooks::ensure_hook_script()
         {

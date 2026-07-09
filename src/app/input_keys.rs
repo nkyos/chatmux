@@ -51,6 +51,26 @@ impl App {
             }
             KeyCode::Char('j') | KeyCode::Down => self.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.select_prev(),
+            KeyCode::Char('J') => {
+                if self.sidebar.sort_mode == SortMode::Manual
+                    && self.sidebar.filter_input.is_none()
+                    && let Some(idx) = self.selected_index()
+                    && idx + 1 < self.manager.len()
+                {
+                    self.manager.sessions_mut().swap(idx, idx + 1);
+                    self.select_by_index(idx + 1);
+                }
+            }
+            KeyCode::Char('K') => {
+                if self.sidebar.sort_mode == SortMode::Manual
+                    && self.sidebar.filter_input.is_none()
+                    && let Some(idx) = self.selected_index()
+                    && idx > 0
+                {
+                    self.manager.sessions_mut().swap(idx, idx - 1);
+                    self.select_by_index(idx - 1);
+                }
+            }
             KeyCode::Enter => {
                 if self.selected.is_some() {
                     self.sidebar.filter_input = None;
@@ -107,7 +127,7 @@ impl App {
                     && let Some(session) = self.manager.sessions_mut().get_mut(idx) {
                         session.jsonl_stamp = None;
                     }
-                self.last_status_poll = Instant::now() - STATUS_POLL_INTERVAL;
+                self.last_status_poll = Instant::now() - self.config.polling.full_interval();
             }
             KeyCode::Char('X') => {
                 if let Some(idx) = self.selected_index()
@@ -116,7 +136,7 @@ impl App {
                         session.jsonl_stamp = None;
                         session.agent_session_id = None;
                     }
-                self.last_status_poll = Instant::now() - STATUS_POLL_INTERVAL;
+                self.last_status_poll = Instant::now() - self.config.polling.full_interval();
             }
             KeyCode::Char('U') => {
                 self.confirm_action = Some(ConfirmAction::UpgradeAndRestart);
