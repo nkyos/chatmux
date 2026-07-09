@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod hooks;
 mod notify;
+mod pipewatch;
 mod projects;
 mod session;
 mod spool;

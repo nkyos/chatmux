@@ -50,6 +50,12 @@ pub struct PollingConfig {
     pub watcher_debounce_ms: u64,
     pub hook_check_ms: u64,
     pub auto_save_secs: u64,
+    /// Main loop frame interval (input poll timeout) in milliseconds.
+    /// Lower values give a smoother display at slightly higher CPU cost.
+    pub frame_ms: u64,
+    /// Fallback capture interval in milliseconds. The selected pane is
+    /// re-captured at least this often even without an output notification.
+    pub capture_fallback_ms: u64,
 }
 
 impl Default for PollingConfig {
@@ -59,6 +65,8 @@ impl Default for PollingConfig {
             watcher_debounce_ms: 300,
             hook_check_ms: 300,
             auto_save_secs: 30,
+            frame_ms: 33,
+            capture_fallback_ms: 1000,
         }
     }
 }
@@ -66,6 +74,12 @@ impl Default for PollingConfig {
 impl PollingConfig {
     pub fn full_interval(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.full_interval_secs.max(5))
+    }
+    pub fn frame(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.frame_ms.clamp(10, 200))
+    }
+    pub fn capture_fallback(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.capture_fallback_ms.max(200))
     }
     pub fn watcher_debounce(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.watcher_debounce_ms.max(50))

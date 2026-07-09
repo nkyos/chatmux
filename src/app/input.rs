@@ -2,7 +2,7 @@ use super::*;
 
 impl App {
     pub fn handle_event(&mut self) -> Result<()> {
-        if !event::poll(Duration::from_millis(100))? {
+        if !event::poll(self.config.polling.frame())? {
             return Ok(());
         }
 

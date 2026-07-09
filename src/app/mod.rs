@@ -212,6 +212,14 @@ pub struct App {
     pub(super) restart_snapshot: Vec<RestartEntry>,
     /// True while an upgrade tmux session is running.
     pub(super) upgrading: bool,
+    /// Push notification of pane output (None → capture every frame).
+    pub(super) pipe_watch: Option<crate::pipewatch::PipeWatch>,
+    /// Session currently piped into the watch FIFO.
+    pub(super) piped_session: Option<String>,
+    /// Last time the selected pane was captured by the fallback timer.
+    pub(super) last_capture_fallback: Instant,
+    /// Scroll offset at the time of the last capture.
+    pub(super) last_captured_scroll: u16,
 }
 
 impl App {
@@ -282,6 +290,10 @@ impl App {
             confirm_action: None,
             restart_snapshot: Vec::new(),
             upgrading: false,
+            pipe_watch: crate::pipewatch::PipeWatch::start(),
+            piped_session: None,
+            last_capture_fallback: Instant::now(),
+            last_captured_scroll: 0,
         };
         result.start_watcher();
         result
@@ -356,6 +368,7 @@ impl App {
 
         // Resize tmux panes to match the terminal view area.
         // Skip sessions that are externally attached or already at the target size.
+        let mut force_capture = false;
         let pane_width = self.terminal.area.width.saturating_sub(2);
         let pane_height = self.terminal.area.height.saturating_sub(2);
         if pane_width > 0 && pane_height > 0 {
@@ -371,26 +384,66 @@ impl App {
                 .into_iter()
                 .map(|i| (i, self.manager.resize(i, pane_width, pane_height).is_ok()))
                 .collect();
+            let selected_idx = self.selected_index();
             for (i, ok) in results {
                 if ok
                     && let Some(s) = self.manager.sessions_mut().get_mut(i)
                 {
                     s.applied_size = Some(target);
+                    // The selected pane re-wraps after a resize; re-capture it.
+                    if selected_idx == Some(i) {
+                        force_capture = true;
+                    }
                 }
             }
         }
 
-        // Capture content for the selected session.
-        if let Some(idx) = self.selected_index() {
-            let result = if self.terminal.scroll > 0 {
-                self.manager
-                    .capture_scroll(idx, self.terminal.scroll, pane_height)
-            } else {
-                self.manager.capture(idx)
-            };
-            if let Ok(content) = result {
-                self.terminal.content = content;
+        // Keep the output pipe bound to the selected session so new output
+        // raises the dirty flag. On the fallback timer, re-issue the pipe:
+        // a session recreated under the same name (restart/upgrade) silently
+        // drops its pipe, and re-piping is idempotent.
+        let fallback_due =
+            self.last_capture_fallback.elapsed() >= self.config.polling.capture_fallback();
+        if let Some(ref watch) = self.pipe_watch {
+            if self.selected != self.piped_session {
+                if let Some(old) = self.piped_session.take() {
+                    self.manager.tmux().pipe_output_off(&old);
+                }
+                if let Some(ref name) = self.selected
+                    && self.manager.tmux().pipe_output_to(name, watch.fifo_path()).is_ok()
+                {
+                    self.piped_session = Some(name.clone());
+                }
+                force_capture = true;
+            } else if fallback_due
+                && let Some(ref name) = self.selected
+            {
+                let _ = self.manager.tmux().pipe_output_to(name, watch.fifo_path());
             }
+        }
+
+        // Capture content for the selected session, but only when there is a
+        // reason to: new output arrived (dirty), the scroll offset changed,
+        // the pane was resized or reselected, or the fallback timer fired.
+        // Without a pipe watch, capture every frame as before.
+        if let Some(idx) = self.selected_index() {
+            let dirty = self.pipe_watch.as_ref().is_none_or(|w| w.take_dirty());
+            let scroll_changed = self.terminal.scroll != self.last_captured_scroll;
+            if dirty || scroll_changed || force_capture || fallback_due {
+                let result = if self.terminal.scroll > 0 {
+                    self.manager
+                        .capture_scroll(idx, self.terminal.scroll, pane_height)
+                } else {
+                    self.manager.capture(idx)
+                };
+                if let Ok(content) = result {
+                    self.terminal.content = content;
+                    self.last_captured_scroll = self.terminal.scroll;
+                }
+            }
+        }
+        if fallback_due {
+            self.last_capture_fallback = Instant::now();
         }
 
         // Check for hook events from Claude Code (primary status source).
@@ -730,6 +783,11 @@ impl App {
     pub fn cleanup(&mut self) {
         if self.upgrading {
             let _ = self.manager.tmux().kill_session("upgrade");
+        }
+        // Stop piping pane output; a dangling pipe would fill the FIFO
+        // once nothing drains it.
+        if let Some(old) = self.piped_session.take() {
+            self.manager.tmux().pipe_output_off(&old);
         }
         // If we quit from the Startup screen without choosing restore or
         // new, leave tmux sessions and saved state untouched so the user

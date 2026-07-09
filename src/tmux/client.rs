@@ -169,6 +169,35 @@ impl TmuxClient {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// Tee pane output of a session into the given FIFO (replaces any
+    /// existing pipe). Used as a push notification that new output exists;
+    /// the bytes themselves are drained and discarded by the reader.
+    pub fn pipe_output_to(&self, session_name: &str, fifo: &std::path::Path) -> Result<()> {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let cmd = format!("cat > {}", shell_words::quote(&fifo.to_string_lossy()));
+        let output = Command::new("tmux")
+            .args(["pipe-pane", "-t", &full_name, &cmd])
+            .output()
+            .context("Failed to run tmux pipe-pane")?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "tmux pipe-pane failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Ok(())
+    }
+
+    /// Stop piping pane output for a session (best effort).
+    pub fn pipe_output_off(&self, session_name: &str) {
+        let full_name = format!("{SESSION_PREFIX}{session_name}");
+        let _ = Command::new("tmux")
+            .args(["pipe-pane", "-t", &full_name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+
     /// Send keys to a tmux session.
     pub fn send_keys(&self, session_name: &str, keys: &str) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");
