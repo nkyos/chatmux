@@ -422,6 +422,28 @@ impl TmuxClient {
         Ok(())
     }
 
+    /// Detect the agent kind running in a tmux session by inspecting
+    /// the pane's current command and start command.
+    pub fn detect_agent_kind(&self, session_name: &str) -> Option<crate::agent::AgentKind> {
+        use crate::agent::AgentKind;
+        if let Some(cmd) = self.get_pane_command(session_name) {
+            match cmd.as_str() {
+                "claude" => return Some(AgentKind::ClaudeCode),
+                "codex" => return Some(AgentKind::Codex),
+                _ => {}
+            }
+        }
+        if let Some(start_cmd) = self.get_pane_start_command(session_name) {
+            if start_cmd.contains("claude") {
+                return Some(AgentKind::ClaudeCode);
+            }
+            if start_cmd.contains("codex") {
+                return Some(AgentKind::Codex);
+            }
+        }
+        None
+    }
+
     /// Resize the tmux pane to match the terminal view area.
     pub fn resize_pane(&self, session_name: &str, width: u16, height: u16) -> Result<()> {
         let full_name = format!("{SESSION_PREFIX}{session_name}");

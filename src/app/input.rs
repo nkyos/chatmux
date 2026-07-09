@@ -116,7 +116,7 @@ impl App {
                 }
                 Event::Paste(text) => {
                     if self.focus == Focus::Terminal
-                        && let Some(idx) = self.selected
+                        && let Some(idx) = self.selected_index()
                             && let Some(session) = self.manager.get(idx) {
                                 let _ = self.manager
                                     .tmux()

@@ -60,16 +60,17 @@ impl App {
                         .map(|s| s.project_name.clone())
                         .unwrap_or_default();
                     let title = format!(" {} [{}] ", project_name, visible.len());
+                    let sel_idx = self.selected_index();
                     let params = SidebarParams {
                         sessions: self.manager.sessions(),
-                        selected: self.selected,
+                        selected: sel_idx,
                         sidebar_focused: self.focus == Focus::Sidebar,
                         theme: &self.theme,
                         sort_mode: self.sidebar.sort_mode,
                         filter: self.sidebar.filter_input.as_deref(),
                         rename: self.sidebar.rename_buf
                             .as_ref()
-                            .map(|buf| (self.selected.unwrap_or(0), buf.as_str())),
+                            .map(|buf| (sel_idx.unwrap_or(0), buf.as_str())),
                         visible: &visible,
                         title_override: Some(&title),
                     };
@@ -77,16 +78,17 @@ impl App {
                 }
                 SidebarView::Sessions => {
                     let visible = self.visible_indices();
+                    let sel_idx = self.selected_index();
                     let params = SidebarParams {
                         sessions: self.manager.sessions(),
-                        selected: self.selected,
+                        selected: sel_idx,
                         sidebar_focused: self.focus == Focus::Sidebar,
                         theme: &self.theme,
                         sort_mode: self.sidebar.sort_mode,
                         filter: self.sidebar.filter_input.as_deref(),
                         rename: self.sidebar.rename_buf
                             .as_ref()
-                            .map(|buf| (self.selected.unwrap_or(0), buf.as_str())),
+                            .map(|buf| (sel_idx.unwrap_or(0), buf.as_str())),
                         visible: &visible,
                         title_override: None,
                     };
@@ -129,7 +131,7 @@ impl App {
             render_project_picker(frame, chunks[1], picker);
         } else if self.selected.is_some() {
             let label = self
-                .selected
+                .selected_index()
                 .and_then(|i| self.manager.get(i))
                 .map(|s| {
                     let base = s.display_label().to_string();

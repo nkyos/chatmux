@@ -150,8 +150,7 @@ impl App {
                         }
                     }
                 } else if self.is_in_terminal(x, y)
-                    && let Some(idx) = self.selected {
-                        // Cache history size when scrolling begins to keep scrollbar stable.
+                    && let Some(idx) = self.selected_index() {
                         if self.terminal.scroll == 0 {
                             self.terminal.scroll_history = self.manager.history_size(idx);
                         }

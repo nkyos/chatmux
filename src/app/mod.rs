@@ -1,8 +1,10 @@
 mod input;
 mod input_keys;
 mod input_mouse;
+mod lifecycle;
 mod render;
 mod session_sync;
+mod upgrade;
 
 use crate::agent::{self, AgentKind, AgentRegistry};
 use crate::config::{Config, ResolvedTheme};
@@ -83,7 +85,7 @@ pub(super) struct RestartEntry {
 pub(super) enum ConfirmAction {
     UpgradeAndRestart,
     RestartAll,
-    DeleteSession { index: usize },
+    DeleteSession { name: String },
     DeleteHistoryEntry { index: usize },
     OpenEditor { cwd: String },
 }
@@ -175,7 +177,7 @@ pub struct App {
     pub(super) theme: ResolvedTheme,
     pub(super) registry: AgentRegistry,
     pub(super) manager: SessionManager,
-    pub(super) selected: Option<usize>,
+    pub(super) selected: Option<String>,
     pub(super) focus: Focus,
     pub(super) mode: AppMode,
     pub(super) should_quit: bool,
@@ -319,6 +321,17 @@ impl App {
         self.should_quit
     }
 
+    /// Resolve the selected session name to an index in the session list.
+    pub(super) fn selected_index(&self) -> Option<usize> {
+        let name = self.selected.as_ref()?;
+        self.manager.sessions().iter().position(|s| &s.name == name)
+    }
+
+    /// Set the selected session by index (stores the session name).
+    pub(super) fn select_by_index(&mut self, index: usize) {
+        self.selected = self.manager.get(index).map(|s| s.name.clone());
+    }
+
     /// Called every frame before draw. Resizes tmux panes and captures content.
     pub fn tick(&mut self) {
         // Skip ticking during startup screen.
@@ -351,18 +364,17 @@ impl App {
         }
 
         // Capture content for the selected session.
-        if let Some(idx) = self.selected
-            && idx < self.manager.len() {
-                let result = if self.terminal.scroll > 0 {
-                    self.manager
-                        .capture_scroll(idx, self.terminal.scroll, pane_height)
-                } else {
-                    self.manager.capture(idx)
-                };
-                if let Ok(content) = result {
-                    self.terminal.content = content;
-                }
+        if let Some(idx) = self.selected_index() {
+            let result = if self.terminal.scroll > 0 {
+                self.manager
+                    .capture_scroll(idx, self.terminal.scroll, pane_height)
+            } else {
+                self.manager.capture(idx)
+            };
+            if let Ok(content) = result {
+                self.terminal.content = content;
             }
+        }
 
         // Check for hook events from Claude Code (primary status source).
         if self.last_hook_check.elapsed() >= HOOK_EVENT_CHECK_INTERVAL {
@@ -509,8 +521,9 @@ impl App {
         if visible.is_empty() {
             return;
         }
-        let old = self.selected;
-        self.selected = Some(match self.selected {
+        let old = self.selected.clone();
+        let current_idx = self.selected_index();
+        let new_idx = match current_idx {
             Some(current) => {
                 if let Some(pos) = visible.iter().position(|&i| i == current) {
                     visible[(pos + 1).min(visible.len() - 1)]
@@ -519,7 +532,8 @@ impl App {
                 }
             }
             None => visible[0],
-        });
+        };
+        self.select_by_index(new_idx);
         if self.selected != old {
             self.terminal.scroll = 0;
         }
@@ -530,8 +544,9 @@ impl App {
         if visible.is_empty() {
             return;
         }
-        let old = self.selected;
-        self.selected = Some(match self.selected {
+        let old = self.selected.clone();
+        let current_idx = self.selected_index();
+        let new_idx = match current_idx {
             Some(current) => {
                 if let Some(pos) = visible.iter().position(|&i| i == current) {
                     visible[pos.saturating_sub(1)]
@@ -540,7 +555,8 @@ impl App {
                 }
             }
             None => visible[0],
-        });
+        };
+        self.select_by_index(new_idx);
         if self.selected != old {
             self.terminal.scroll = 0;
         }
@@ -577,7 +593,7 @@ impl App {
                 }
                 let vis_idx = if has_filter { item_idx - 2 } else { item_idx };
                 if vis_idx < visible.len() {
-                    self.selected = Some(visible[vis_idx]);
+                    self.select_by_index(visible[vis_idx]);
                     self.terminal.scroll = 0;
                     self.focus = Focus::Sidebar;
                 }
@@ -590,7 +606,7 @@ impl App {
 
     /// If the selected session is Replied, mark it as Read.
     pub(super) fn mark_selected_as_read(&mut self) {
-        if let Some(idx) = self.selected
+        if let Some(idx) = self.selected_index()
             && let Some(session) = self.manager.sessions_mut().get_mut(idx)
                 && session.status == crate::session::SessionStatus::Replied {
                     session.status = crate::session::SessionStatus::Read;
@@ -603,9 +619,9 @@ impl App {
         if visible.is_empty() {
             return;
         }
-        if let Some(sel) = self.selected
-            && !visible.contains(&sel) {
-                self.selected = Some(visible[0]);
+        if let Some(sel_idx) = self.selected_index()
+            && !visible.contains(&sel_idx) {
+                self.select_by_index(visible[0]);
             }
     }
 
@@ -616,62 +632,9 @@ impl App {
         if self.focus != Focus::Terminal {
             return;
         }
-        let idx = self
-            .manager
-            .sessions()
-            .iter()
-            .position(|s| s.name == name);
-        if self.selected == idx {
+        if self.selected.as_deref() == Some(name) {
             self.focus = Focus::Sidebar;
         }
-    }
-
-    pub(super) fn create_session(&mut self, path: &str, agent_kind: AgentKind) -> Result<()> {
-        let agent = self.registry.get(agent_kind);
-        // Use the terminal area size (minus borders) for the tmux pane.
-        let width = self.terminal.area.width.saturating_sub(2);
-        let height = self.terminal.area.height.saturating_sub(2);
-        let idx = self.manager.create(path, agent, width, height)?;
-        self.selected = Some(idx);
-        self.picker = None;
-        self.focus = Focus::Terminal;
-        // Add newly used path to cache if not already present.
-        if !self.cached_projects.contains(&path.to_string()) {
-            self.cached_projects.insert(0, path.to_string());
-        }
-        // Save state immediately so crash recovery has this session.
-        self.manager.save_state();
-        Ok(())
-    }
-
-    pub(super) fn resume_in_project(&mut self, path: &str, agent_kind: AgentKind) -> Result<()> {
-        let agent = self.registry.get(agent_kind);
-        let width = self.terminal.area.width.saturating_sub(2);
-        let height = self.terminal.area.height.saturating_sub(2);
-        let idx = self.manager.create_resume_picker(path, agent, width, height)?;
-        self.selected = Some(idx);
-        self.picker = None;
-        self.focus = Focus::Terminal;
-        if !self.cached_projects.contains(&path.to_string()) {
-            self.cached_projects.insert(0, path.to_string());
-        }
-        Ok(())
-    }
-
-    /// Open the project directory in the configured editor.
-    pub(super) fn open_editor(&self, cwd: &str) -> Result<()> {
-        let (program, args) = self.config.editor_command_parts();
-
-        // Spawn detached — works for GUI editors (code, cursor, zed, etc.).
-        std::process::Command::new(&program)
-            .args(&args)
-            .arg(cwd)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-            .ok();
-        Ok(())
     }
 
     /// Extract plain text lines from the terminal content (ANSI stripped).
@@ -735,246 +698,9 @@ impl App {
         let _ = std::io::Write::flush(&mut std::io::stdout());
     }
 
-    /// Snapshot all current sessions for restart/upgrade.
-    pub(super) fn snapshot_sessions(&self) -> Vec<RestartEntry> {
-        self.manager
-            .sessions()
-            .iter()
-            .map(|s| RestartEntry {
-                cwd: s.cwd.clone(),
-                agent_kind: s.agent_kind,
-                task_label: s.task_label.clone(),
-                agent_session_id: s.agent_session_id.clone(),
-            })
-            .collect()
-    }
-
-    /// Kill all sessions (without recording history — they'll be resumed).
-    pub(super) fn kill_all_for_restart(&mut self) {
-        self.manager.kill_all_chatmux_sessions();
-        self.manager.sessions_mut().clear();
-        self.selected = None;
-        self.terminal.content.clear();
-        crate::session::state::remove();
-    }
-
-    /// Recreate sessions from a snapshot using resume commands.
-    pub(super) fn recreate_from_snapshot(&mut self, snapshot: &[RestartEntry]) -> Result<()> {
-        let width = self.terminal.area.width.saturating_sub(2);
-        let height = self.terminal.area.height.saturating_sub(2);
-
-        for entry in snapshot {
-            let agent = self.registry.get(entry.agent_kind);
-            let idx = self.manager.create_resume(
-                &entry.cwd,
-                agent,
-                entry.agent_session_id.as_deref(),
-                width,
-                height,
-            )?;
-            if let Some(ref label) = entry.task_label
-                && let Some(session) = self.manager.sessions_mut().get_mut(idx) {
-                    session.task_label = Some(label.clone());
-                }
-        }
-
-        if !self.manager.is_empty() {
-            self.selected = Some(0);
-        }
-        Ok(())
-    }
-
-    /// Execute restart-all: snapshot → kill → recreate.
-    pub(super) fn do_restart_all(&mut self) -> Result<()> {
-        let snapshot = self.snapshot_sessions();
-        self.kill_all_for_restart();
-        self.recreate_from_snapshot(&snapshot)?;
-        Ok(())
-    }
-
-    /// Start upgrade + restart: snapshot → kill → run upgrade script.
-    pub(super) fn do_upgrade_and_restart(&mut self) -> Result<()> {
-        self.restart_snapshot = self.snapshot_sessions();
-        self.kill_all_for_restart();
-
-        let script = self.build_upgrade_script();
-        let width = self.terminal.area.width.saturating_sub(2);
-        let height = self.terminal.area.height.saturating_sub(2);
-
-        self.manager.tmux().new_session_with_remain_on_exit(
-            "upgrade",
-            "/tmp",
-            "sh",
-            &["-c".into(), script],
-            width,
-            height,
-        )?;
-        self.upgrading = true;
-        Ok(())
-    }
-
-    /// Called when the upgrade tmux session finishes.
-    pub(super) fn finish_upgrade(&mut self) -> Result<()> {
-        self.upgrading = false;
-        let _ = self.manager.tmux().kill_session("upgrade");
-        let snapshot = std::mem::take(&mut self.restart_snapshot);
-        self.recreate_from_snapshot(&snapshot)?;
-        Ok(())
-    }
-
-    /// Build a shell script that upgrades all agent kinds used in the snapshot.
-    fn build_upgrade_script(&self) -> String {
-        let mut kinds: HashSet<AgentKind> = self
-            .restart_snapshot
-            .iter()
-            .map(|e| e.agent_kind)
-            .collect();
-
-        // If no sessions, upgrade all available agents.
-        if kinds.is_empty() {
-            for agent in self.registry.available() {
-                kinds.insert(agent.kind());
-            }
-        }
-
-        let mut commands = Vec::new();
-        if kinds.contains(&AgentKind::ClaudeCode) {
-            commands.push(resolve_upgrade_command(
-                self.config.upgrade.claude_code.as_deref(),
-                "claude-code",
-                "claude",
-                "@anthropic-ai/claude-code",
-                "claude-code",
-            ));
-        }
-        if kinds.contains(&AgentKind::Codex) {
-            commands.push(resolve_upgrade_command(
-                self.config.upgrade.codex.as_deref(),
-                "codex",
-                "codex",
-                "@openai/codex",
-                "codex",
-            ));
-        }
-
-        if commands.is_empty() {
-            "echo 'No agents to upgrade'".into()
-        } else {
-            commands.join("\n")
-        }
-    }
-
-    /// Execute the confirmed action (called from input handler).
-    pub(super) fn execute_confirmed_action(&mut self) -> Result<()> {
-        let action = self.confirm_action.take();
-        match action {
-            Some(ConfirmAction::UpgradeAndRestart) => self.do_upgrade_and_restart(),
-            Some(ConfirmAction::RestartAll) => self.do_restart_all(),
-            Some(ConfirmAction::DeleteSession { index }) => {
-                self.manager.remove(index)?;
-                // Post-delete UI update depends on current view.
-                match &self.sidebar.view {
-                    SidebarView::ProjectSessions(cwd) => {
-                        let cwd = cwd.clone();
-                        let visible = self.project_session_indices(&cwd);
-                        if visible.is_empty() {
-                            self.selected = None;
-                            self.terminal.content.clear();
-                            self.sidebar.view = SidebarView::Projects;
-                        } else {
-                            self.selected = Some(visible[0]);
-                        }
-                    }
-                    _ => {
-                        if self.manager.is_empty() {
-                            self.selected = None;
-                            self.terminal.content.clear();
-                        } else {
-                            self.selected = Some(index.min(self.manager.len() - 1));
-                        }
-                    }
-                }
-                Ok(())
-            }
-            Some(ConfirmAction::DeleteHistoryEntry { index }) => {
-                if index < self.sidebar.history_entries.len() {
-                    self.sidebar.history_entries.remove(index);
-                    crate::session::state::save_history(&self.sidebar.history_entries);
-                    if !self.sidebar.history_entries.is_empty() {
-                        self.sidebar.history_selected =
-                            self.sidebar.history_selected.min(self.sidebar.history_entries.len() - 1);
-                    }
-                }
-                Ok(())
-            }
-            Some(ConfirmAction::OpenEditor { cwd }) => {
-                self.open_editor(&cwd)
-            }
-            None => Ok(()),
-        }
-    }
-
     /// Number of active sessions (for confirm dialog message).
     pub(super) fn session_count(&self) -> usize {
         self.manager.len()
-    }
-
-    /// Cold-restore sessions from saved state when tmux sessions are gone (e.g. after reboot).
-    /// Creates new tmux sessions using agent resume commands and restores metadata.
-    pub(super) fn cold_restore_sessions(&mut self) -> Result<()> {
-        let Some(saved) = crate::session::state::load() else {
-            return Ok(());
-        };
-
-        let width = self.terminal.area.width.saturating_sub(2);
-        let height = self.terminal.area.height.saturating_sub(2);
-
-        for entry in &saved.sessions {
-            if !std::path::Path::new(&entry.cwd).is_dir() {
-                continue;
-            }
-
-            let agent = self.registry.get(entry.agent_kind);
-            let idx = self.manager.create_resume(
-                &entry.cwd,
-                agent,
-                entry.agent_session_id.as_deref(),
-                width,
-                height,
-            )?;
-
-            if let Some(session) = self.manager.sessions_mut().get_mut(idx) {
-                session.task_label = entry.task_label.clone();
-                session.last_prompt = entry.last_prompt.clone();
-                session.last_reply = entry.last_reply.clone();
-                session.status = match entry.status.as_deref() {
-                    Some("replied") => SessionStatus::Replied,
-                    Some("read") => SessionStatus::Read,
-                    Some("input") => SessionStatus::InputRequired,
-                    _ => SessionStatus::Working,
-                };
-                if entry.branch.is_some() {
-                    session.branch = entry.branch.clone();
-                }
-                if let Some(epoch) = entry.last_activity_epoch {
-                    session.set_activity_from_epoch(epoch);
-                }
-                // Restore created_epoch from saved state for correct JSONL matching.
-                if entry.created_epoch.is_some() {
-                    session.created_epoch = entry.created_epoch;
-                }
-                // Restore JSONL path if the file still exists.
-                if let Some(ref path_str) = entry.session_file {
-                    let path = std::path::PathBuf::from(path_str);
-                    if path.exists() {
-                        session.jsonl_path = Some(path);
-                    }
-                }
-            }
-        }
-
-        self.manager.ensure_next_id(saved.next_id);
-        Ok(())
     }
 
     pub fn cleanup(&mut self) {
@@ -1000,37 +726,4 @@ impl App {
             self.manager.save_state();
         }
     }
-}
-
-/// Resolve an upgrade command for a single agent. If the user supplied an
-/// override in config it is used verbatim; otherwise a shell snippet is
-/// generated that detects the install method at runtime and prefers, in order:
-/// mise → Homebrew → npm global.
-fn resolve_upgrade_command(
-    override_cmd: Option<&str>,
-    label: &str,
-    bin: &str,
-    npm_pkg: &str,
-    brew_formula: &str,
-) -> String {
-    if let Some(cmd) = override_cmd {
-        return cmd.to_string();
-    }
-    format!(
-        r#"echo "== Upgrading {label} =="
-if ! command -v {bin} >/dev/null 2>&1; then
-  echo "{bin}: not installed, skipping"
-elif command -v mise >/dev/null 2>&1 && mise which {bin} >/dev/null 2>&1; then
-  echo "-> detected mise"
-  mise upgrade 'npm:{npm_pkg}'
-elif command -v brew >/dev/null 2>&1 && brew list {brew_formula} >/dev/null 2>&1; then
-  echo "-> detected homebrew"
-  brew upgrade {brew_formula}
-elif command -v npm >/dev/null 2>&1; then
-  echo "-> fallback to npm global"
-  npm install -g '{npm_pkg}@latest'
-else
-  echo "{label}: no supported package manager found (mise/brew/npm)"
-fi"#
-    )
 }

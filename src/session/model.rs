@@ -1,5 +1,6 @@
 use crate::agent::{AgentKind, FileStamp};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Return the current time as a Unix epoch (seconds).
@@ -44,6 +45,26 @@ impl SessionStatus {
             Self::Replied => "replied",
             Self::Read => "read",
             Self::InputRequired => "input",
+        }
+    }
+}
+
+impl std::fmt::Display for SessionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl FromStr for SessionStatus {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "working" => Ok(Self::Working),
+            "replied" => Ok(Self::Replied),
+            "read" => Ok(Self::Read),
+            "input" => Ok(Self::InputRequired),
+            _ => Err(()),
         }
     }
 }
@@ -181,6 +202,18 @@ impl Session {
     /// Refresh the git branch from the session's cwd.
     pub fn refresh_branch(&mut self) {
         self.branch = detect_git_branch(&self.cwd);
+    }
+
+    /// Convert to a history entry for recording session end.
+    pub fn to_history_entry(&self) -> super::state::HistoryEntry {
+        super::state::HistoryEntry {
+            cwd: self.cwd.clone(),
+            project_name: self.project_name.clone(),
+            agent_kind: self.agent_kind,
+            task_label: self.task_label.clone(),
+            last_prompt: self.last_prompt.clone(),
+            ended_at: now_epoch(),
+        }
     }
 }
 

@@ -13,7 +13,7 @@ impl App {
                     self.manager.restore();
                 }
                 if !self.manager.is_empty() {
-                    self.selected = Some(0);
+                    self.select_by_index(0);
                 }
                 // Save state immediately so crash recovery has current sessions.
                 self.manager.save_state();
@@ -69,18 +69,18 @@ impl App {
                 self.focus = Focus::ProjectPicker;
             }
             KeyCode::Char('e') => {
-                if let Some(idx) = self.selected
+                if let Some(idx) = self.selected_index()
                     && let Some(session) = self.manager.get(idx) {
                         self.confirm_action = Some(ConfirmAction::OpenEditor { cwd: session.cwd.clone() });
                     }
             }
             KeyCode::Char('d') => {
-                if let Some(idx) = self.selected {
-                    self.confirm_action = Some(ConfirmAction::DeleteSession { index: idx });
+                if let Some(name) = self.selected.clone() {
+                    self.confirm_action = Some(ConfirmAction::DeleteSession { name });
                 }
             }
             KeyCode::Char('r') => {
-                if let Some(idx) = self.selected
+                if let Some(idx) = self.selected_index()
                     && let Some(session) = self.manager.get(idx) {
                         let current = session.task_label.clone().unwrap_or_default();
                         self.sidebar.rename_buf = Some(current);
@@ -103,17 +103,14 @@ impl App {
                 self.sidebar.project_selected = 0;
             }
             KeyCode::Char('x') => {
-                // Force re-read JSONL for selected session (fixes stale status).
-                if let Some(idx) = self.selected
+                if let Some(idx) = self.selected_index()
                     && let Some(session) = self.manager.sessions_mut().get_mut(idx) {
                         session.jsonl_stamp = None;
                     }
-                // Trigger immediate poll.
                 self.last_status_poll = Instant::now() - STATUS_POLL_INTERVAL;
             }
             KeyCode::Char('X') => {
-                // Force re-resolve JSONL association for selected session.
-                if let Some(idx) = self.selected
+                if let Some(idx) = self.selected_index()
                     && let Some(session) = self.manager.sessions_mut().get_mut(idx) {
                         session.jsonl_path = None;
                         session.jsonl_stamp = None;
@@ -172,7 +169,9 @@ impl App {
                             let cwd = proj.cwd.clone();
                             let indices = self.project_session_indices(&cwd);
                             self.sidebar.view = SidebarView::ProjectSessions(cwd);
-                            self.selected = indices.first().copied();
+                            if let Some(&idx) = indices.first() {
+                                self.select_by_index(idx);
+                            }
                             self.terminal.scroll = 0;
                         }
                     }
@@ -238,12 +237,12 @@ impl App {
                         }
                     }
                     KeyCode::Char('d') => {
-                        if let Some(idx) = self.selected {
-                            self.confirm_action = Some(ConfirmAction::DeleteSession { index: idx });
+                        if let Some(name) = self.selected.clone() {
+                            self.confirm_action = Some(ConfirmAction::DeleteSession { name });
                         }
                     }
                     KeyCode::Char('r') => {
-                        if let Some(idx) = self.selected
+                        if let Some(idx) = self.selected_index()
                             && let Some(session) = self.manager.get(idx) {
                                 let current =
                                     session.task_label.clone().unwrap_or_default();
@@ -262,7 +261,7 @@ impl App {
                         self.focus = Focus::ProjectPicker;
                     }
                     KeyCode::Char('e') => {
-                        if let Some(idx) = self.selected
+                        if let Some(idx) = self.selected_index()
                             && let Some(session) = self.manager.get(idx) {
                                 self.confirm_action = Some(ConfirmAction::OpenEditor { cwd: session.cwd.clone() });
                             }
@@ -310,7 +309,7 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let (Some(idx), Some(buf)) = (self.selected, self.sidebar.rename_buf.take())
+                if let (Some(idx), Some(buf)) = (self.selected_index(), self.sidebar.rename_buf.take())
                     && let Some(session) = self.manager.sessions_mut().get_mut(idx) {
                         session.task_label = if buf.is_empty() { None } else { Some(buf) };
                     }
@@ -402,7 +401,7 @@ impl App {
                     return Ok(());
                 }
                 _ if is_prefix_key(code, modifiers) => {
-                    if let Some(idx) = self.selected {
+                    if let Some(idx) = self.selected_index() {
                         let _ = self.manager.send_keys(idx, "C-]");
                     }
                     return Ok(());
@@ -421,7 +420,7 @@ impl App {
             return Ok(());
         }
 
-        let Some(idx) = self.selected else {
+        let Some(idx) = self.selected_index() else {
             return Ok(());
         };
 

@@ -89,43 +89,17 @@ impl App {
         // Remove dead sessions (tmux session no longer exists).
         let had_dead = self.manager.sessions().iter().any(|s| !live.contains(&s.name));
         if had_dead {
-            // Record dead sessions in history before removing.
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
             for session in self.manager.sessions() {
                 if !live.contains(&session.name) {
-                    let entry = crate::session::state::HistoryEntry {
-                        cwd: session.cwd.clone(),
-                        project_name: session.project_name.clone(),
-                        agent_kind: session.agent_kind,
-                        task_label: session.task_label.clone(),
-                        last_prompt: session.last_prompt.clone(),
-                        ended_at: now,
-                    };
-                    crate::session::state::append_history(&entry);
+                    crate::session::state::append_history(&session.to_history_entry());
                 }
             }
 
-            // Get the currently selected session name before removal.
-            let selected_name = self
-                .selected
-                .and_then(|idx| self.manager.get(idx))
-                .map(|s| s.name.clone());
-
             self.manager.sessions_mut().retain(|s| live.contains(&s.name));
 
-            // Fix up selected index after removal.
-            if let Some(name) = selected_name {
-                self.selected = self
-                    .manager
-                    .sessions()
-                    .iter()
-                    .position(|s| s.name == name);
-            }
-            if self.selected.is_none() && !self.manager.is_empty() {
-                self.selected = Some(0);
+            // If the selected session was removed, pick the first available.
+            if self.selected_index().is_none() && !self.manager.is_empty() {
+                self.select_by_index(0);
             }
         }
 
@@ -207,27 +181,8 @@ impl App {
     }
 
     /// Detect agent kind by checking the process tree inside the tmux pane.
-    /// `pane_current_command` may return the parent shell (e.g. "fish"),
-    /// so we also check the pane's full command line via pane_start_command.
     pub(super) fn detect_agent_kind(&self, name: &str) -> Option<AgentKind> {
-        // First try pane_current_command (works when claude/codex is foreground).
-        if let Some(cmd) = self.manager.tmux().get_pane_command(name) {
-            match cmd.as_str() {
-                "claude" => return Some(AgentKind::ClaudeCode),
-                "codex" => return Some(AgentKind::Codex),
-                _ => {}
-            }
-        }
-        // Fall back: check the original start command of the pane.
-        if let Some(start_cmd) = self.manager.tmux().get_pane_start_command(name) {
-            if start_cmd.contains("claude") {
-                return Some(AgentKind::ClaudeCode);
-            }
-            if start_cmd.contains("codex") {
-                return Some(AgentKind::Codex);
-            }
-        }
-        None
+        self.manager.tmux().detect_agent_kind(name)
     }
 
     /// Check session files for each session and update their status via agent adapters.
@@ -471,12 +426,6 @@ impl App {
         if self.manager.is_empty() {
             return;
         }
-        // Remember selected session name to preserve selection after sort.
-        let selected_name = self
-            .selected
-            .and_then(|i| self.manager.get(i))
-            .map(|s| s.name.clone());
-
         match self.sidebar.sort_mode {
             SortMode::StatusPriority => {
                 self.manager.sort_by_priority();
@@ -485,15 +434,6 @@ impl App {
                 self.manager.sort_by_activity();
             }
             SortMode::Manual => {}
-        }
-
-        // Restore selection by name.
-        if let Some(name) = selected_name {
-            self.selected = self
-                .manager
-                .sessions()
-                .iter()
-                .position(|s| s.name == name);
         }
     }
 

@@ -80,19 +80,7 @@ impl SessionManager {
             anyhow::bail!("Session index out of range");
         }
         let session = self.sessions.remove(index);
-        // Record in history before killing.
-        let entry = state::HistoryEntry {
-            cwd: session.cwd.clone(),
-            project_name: session.project_name.clone(),
-            agent_kind: session.agent_kind,
-            task_label: session.task_label.clone(),
-            last_prompt: session.last_prompt.clone(),
-            ended_at: std::time::SystemTime::now()
-                .duration_since(std::time::SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs(),
-        };
-        state::append_history(&entry);
+        state::append_history(&session.to_history_entry());
         // Best-effort kill; ignore errors if already dead.
         let _ = self.tmux.kill_session(&session.name);
         Ok(())
@@ -223,13 +211,9 @@ impl SessionManager {
                     session.task_label = entry.task_label;
                     session.last_prompt = entry.last_prompt;
                     session.last_reply = entry.last_reply;
-                    // Restore saved status (defaults to Working if missing).
-                    session.status = match entry.status.as_deref() {
-                        Some("replied") => SessionStatus::Replied,
-                        Some("read") => SessionStatus::Read,
-                        Some("input") => SessionStatus::InputRequired,
-                        _ => SessionStatus::Working,
-                    };
+                    session.status = entry.status.as_deref()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(SessionStatus::Working);
                     session.jsonl_path = entry
                         .session_file
                         .as_ref()
@@ -286,7 +270,7 @@ impl SessionManager {
                 .tmux
                 .get_pane_cwd(name)
                 .unwrap_or_else(|| "/".to_string());
-            let agent_kind = self.detect_agent_from_tmux(name);
+            let agent_kind = self.tmux.detect_agent_kind(name).unwrap_or_default();
             let session = Session::new(name.clone(), cwd, agent_kind);
             self.sessions.push(session);
         }
@@ -301,26 +285,6 @@ impl SessionManager {
                 self.next_id = self.next_id.max(num + 1);
             }
         }
-    }
-
-    /// Detect agent kind from tmux pane command.
-    fn detect_agent_from_tmux(&self, name: &str) -> AgentKind {
-        if let Some(cmd) = self.tmux.get_pane_command(name) {
-            match cmd.as_str() {
-                "claude" => return AgentKind::ClaudeCode,
-                "codex" => return AgentKind::Codex,
-                _ => {}
-            }
-        }
-        if let Some(start_cmd) = self.tmux.get_pane_start_command(name) {
-            if start_cmd.contains("claude") {
-                return AgentKind::ClaudeCode;
-            }
-            if start_cmd.contains("codex") {
-                return AgentKind::Codex;
-            }
-        }
-        AgentKind::default()
     }
 
     /// Save current session state to disk.
@@ -467,21 +431,8 @@ impl SessionManager {
 
     /// Kill all managed tmux sessions and remove state file. Call on full shutdown.
     pub fn cleanup(&mut self) {
-        // Record all sessions in history before killing.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
         for session in &self.sessions {
-            let entry = state::HistoryEntry {
-                cwd: session.cwd.clone(),
-                project_name: session.project_name.clone(),
-                agent_kind: session.agent_kind,
-                task_label: session.task_label.clone(),
-                last_prompt: session.last_prompt.clone(),
-                ended_at: now,
-            };
-            state::append_history(&entry);
+            state::append_history(&session.to_history_entry());
         }
         let live_names: Vec<String> =
             self.sessions.iter().map(|s| s.name.clone()).collect();
