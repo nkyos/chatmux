@@ -2,6 +2,7 @@ mod claude_code;
 mod codex;
 
 pub use claude_code::ClaudeCodeAgent;
+pub(crate) use claude_code::encode_project_path;
 pub use codex::CodexAgent;
 
 use crate::session::SessionStatus;

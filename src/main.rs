@@ -6,6 +6,7 @@ mod hooks;
 mod notify;
 mod projects;
 mod session;
+mod spool;
 mod tmux;
 mod tui;
 

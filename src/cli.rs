@@ -1,6 +1,6 @@
 use crate::agent::{AgentKind, AgentRegistry};
 use crate::session::model::{detect_git_branch, now_epoch};
-use crate::session::state::{self, SavedState, SessionEntry};
+use crate::spool::{SpoolEntry, write_spool};
 use crate::tmux::TmuxClient;
 use anyhow::Result;
 use std::os::unix::process::CommandExt;
@@ -9,7 +9,9 @@ use std::path::Path;
 /// Run an agent in a chatmux-managed tmux session and attach to it.
 ///
 /// This creates a tmux session with the chatmux naming convention so
-/// the chatmux TUI can discover and manage it.
+/// the chatmux TUI can discover and manage it. Metadata is written to
+/// a spool file (`pending/{name}.json`) instead of sessions.json —
+/// the TUI picks it up on discovery.
 pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
     let cwd = std::env::current_dir()?
         .to_string_lossy()
@@ -17,13 +19,9 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
     let registry = AgentRegistry::new();
     let agent = registry.get(kind);
 
-    // Load existing state to determine next session ID.
-    let (next_id, mut sessions) = match state::load() {
-        Some(saved) => (saved.next_id, saved.sessions),
-        None => (0, vec![]),
-    };
-
-    let name = format!("s{next_id}");
+    // Use a UUID-based name to avoid next_id contention with the TUI.
+    let short_uuid = &uuid::Uuid::new_v4().to_string()[..8];
+    let name = format!("x{short_uuid}");
     let full_name = format!("chatmux-{name}");
 
     // Generate a deterministic session ID for agents that support it.
@@ -48,29 +46,18 @@ pub fn run_attach(kind: AgentKind, extra_args: &[String]) -> Result<()> {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| cwd.clone());
 
-    // Save state BEFORE creating the session so TUI can discover it.
-    sessions.push(SessionEntry {
-        name: name.clone(),
+    // Write spool file so TUI can pick up metadata on discovery.
+    let spool = SpoolEntry {
         cwd: cwd.clone(),
         project_name,
         agent_kind: kind,
-        task_label: None,
-        last_prompt: None,
-        last_reply: None,
-        session_file: jsonl_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
-        last_activity_epoch: Some(now_epoch()),
-        status: Some("working".to_string()),
-        jsonl_modified_epoch: None,
-        jsonl_modified_nsec: None,
-        jsonl_len: None,
-        branch: detect_git_branch(&cwd),
         agent_session_id: Some(session_uuid),
-        created_epoch: None,
-    });
-    state::save(&SavedState {
-        sessions,
-        next_id: next_id + 1,
-    })?;
+        session_file: jsonl_path.as_ref().map(|p| p.to_string_lossy().into_owned()),
+        task_label: None,
+        created_epoch: now_epoch(),
+        branch: detect_git_branch(&cwd),
+    };
+    let _ = write_spool(&name, &spool);
 
     // Create session + configure + attach in one tmux invocation.
     // Using non-detached mode so tmux uses the actual terminal size.

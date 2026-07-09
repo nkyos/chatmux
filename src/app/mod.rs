@@ -390,9 +390,14 @@ impl App {
         }
 
         // Check for hook events from Claude Code (primary status source).
+        // Also check for pending spool files from CLI-created sessions.
         if self.last_hook_check.elapsed() >= HOOK_EVENT_CHECK_INTERVAL {
             self.last_hook_check = Instant::now();
             self.process_hook_events();
+            if crate::spool::pending_dir().read_dir().is_ok_and(|mut d| d.next().is_some()) {
+                self.discover_external_sessions();
+                self.auto_sort();
+            }
         }
 
         // Check watcher for dirty JSONL files and poll affected sessions.

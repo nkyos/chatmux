@@ -77,7 +77,8 @@ impl App {
     }
 
     /// Discover chatmux tmux sessions created externally (e.g. via `chatmux claude`).
-    /// Also removes sessions whose tmux session has died.
+    /// Also removes sessions whose tmux session has died, and picks up
+    /// spool metadata from CLI-created sessions.
     pub(super) fn discover_external_sessions(&mut self) {
         let live: std::collections::HashSet<String> = self
             .manager
@@ -110,10 +111,25 @@ impl App {
             .map(|s| s.name.clone())
             .collect();
 
+        // Read spool files for CLI-created sessions.
+        let pending = crate::spool::list_pending();
+
         // Collect info for new sessions first (avoids borrow conflicts).
         let new_sessions: Vec<_> = live.iter()
             .filter(|name| !tracked.contains(*name))
             .map(|name| {
+                // Check spool file for metadata first.
+                if let Some((_, spool)) = pending.iter().find(|(n, _)| n == name) {
+                    let has_client = self.manager.tmux().has_attached_client(name);
+                    return (
+                        name.clone(),
+                        spool.cwd.clone(),
+                        spool.agent_kind,
+                        has_client,
+                        Some(spool),
+                    );
+                }
+
                 let cwd = self
                     .manager
                     .tmux()
@@ -126,14 +142,25 @@ impl App {
                     .unwrap_or_default();
 
                 let has_client = self.manager.tmux().has_attached_client(name);
-                (name.clone(), cwd, agent_kind, has_client)
+                (name.clone(), cwd, agent_kind, has_client, None)
             })
             .collect();
 
-        for (name, cwd, agent_kind, has_client) in new_sessions {
+        for (name, cwd, agent_kind, has_client, spool) in new_sessions {
             let mut session =
                 crate::session::Session::new(name.clone(), cwd.clone(), agent_kind);
             session.attached_externally = has_client;
+
+            // Apply spool metadata and remove the spool file.
+            if let Some(spool) = spool {
+                session.agent_session_id = spool.agent_session_id.clone();
+                session.jsonl_path = spool.session_file.as_ref().map(std::path::PathBuf::from);
+                session.task_label = spool.task_label.clone();
+                if spool.branch.is_some() {
+                    session.branch = spool.branch.clone();
+                }
+                crate::spool::remove_spool(&name);
+            }
 
             self.manager.sessions_mut().push(session);
 
@@ -141,6 +168,9 @@ impl App {
                 self.manager.ensure_next_id(num + 1);
             }
         }
+
+        // Clean up stale spool files (exec failed, session never appeared).
+        crate::spool::cleanup_stale(&live, 3600);
 
         // Update attached_externally flag for all tracked sessions.
         let attach_status: Vec<_> = self.manager.sessions()
@@ -189,6 +219,14 @@ impl App {
             })
             .collect();
 
+        // Build the set of assigned JSONL paths to prevent fallback collisions.
+        let assigned_paths: HashSet<PathBuf> = self
+            .manager
+            .sessions()
+            .iter()
+            .filter_map(|s| s.jsonl_path.clone())
+            .collect();
+
         let registry = &self.registry;
         let mut became_working: Option<String> = None;
 
@@ -209,10 +247,16 @@ impl App {
 
                 if needs_resolve {
                     session.jsonl_stamp = None;
+                    // Exclude paths assigned to other sessions from fallback.
+                    let exclude: HashSet<PathBuf> = assigned_paths.iter()
+                        .filter(|p| session.jsonl_path.as_ref() != Some(p))
+                        .cloned()
+                        .collect();
                     let found = find_best_session_file(
                         agent_adapter,
                         &session.cwd,
                         session.agent_session_id.as_deref(),
+                        &exclude,
                     );
                     if found.is_none()
                         || session.agent_session_id.as_ref().is_some_and(|id| {
@@ -251,12 +295,12 @@ impl App {
             }
 
             if !file_changed {
-                let agent_running = pane_commands.get(&session.name)
-                    .is_some_and(|cmd| matches!(cmd.as_str(), "claude" | "codex" | "node"));
+                let agent_exited = pane_commands.get(&session.name)
+                    .is_some_and(|cmd| matches!(cmd.as_str(), "zsh" | "bash" | "fish" | "sh" | "nu" | "dash"));
 
                 // Agent exited: if the pane fell back to a shell while status
                 // is Working, the agent exited without writing end_turn.
-                if matches!(session.status, SessionStatus::Working | SessionStatus::InputRequired) && !agent_running {
+                if matches!(session.status, SessionStatus::Working | SessionStatus::InputRequired) && agent_exited {
                     session.status = SessionStatus::Replied;
                     session.touch_activity();
                     if notifications_enabled
@@ -292,8 +336,8 @@ impl App {
     }
 
     /// Poll only sessions whose JSONL file was dirtied by the watcher.
-    /// Also detects unassigned dirty files (e.g. after /clear) and triggers
-    /// an immediate full poll when found.
+    /// Also detects unassigned dirty files that could belong to tracked sessions
+    /// (e.g. after /clear) and triggers an immediate full poll when found.
     /// Returns the name of a session that just transitioned to Working (user sent a prompt).
     pub(super) fn poll_dirty_sessions(&mut self, dirty: &HashSet<PathBuf>) -> Option<String> {
         let notifications_enabled = self.config.notifications.enabled;
@@ -309,7 +353,41 @@ impl App {
             .filter_map(|s| s.jsonl_path.clone())
             .collect();
 
-        let has_unassigned = dirty.iter().any(|p| !assigned_paths.contains(p));
+        // Only trigger full poll for unassigned files that could belong to tracked sessions.
+        let tracked_encoded_cwds: HashSet<String> = self
+            .manager
+            .sessions()
+            .iter()
+            .filter(|s| s.agent_kind == AgentKind::ClaudeCode)
+            .map(|s| crate::agent::encode_project_path(&s.cwd))
+            .collect();
+        let tracked_codex_cwds: HashSet<String> = self
+            .manager
+            .sessions()
+            .iter()
+            .filter(|s| s.agent_kind == AgentKind::Codex)
+            .map(|s| s.cwd.clone())
+            .collect();
+
+        let has_unassigned = dirty.iter().any(|p| {
+            if assigned_paths.contains(p) {
+                return false;
+            }
+            // Claude: parent dir name must match an encoded cwd of a tracked session.
+            if let Some(parent) = p.parent()
+                && let Some(dir_name) = parent.file_name().and_then(|n| n.to_str())
+                && tracked_encoded_cwds.contains(dir_name)
+            {
+                return true;
+            }
+            // Codex: only consider if we have any tracked Codex sessions.
+            if !tracked_codex_cwds.is_empty()
+                && p.to_str().is_some_and(|s| s.contains(".codex/sessions/"))
+            {
+                return true;
+            }
+            false
+        });
 
         for session in self.manager.sessions_mut() {
             let Some(ref jsonl_path) = session.jsonl_path else {
@@ -408,15 +486,16 @@ impl App {
 ///
 /// Resolution order:
 /// 1. Direct match by `agent_session_id` (filename = `{id}.jsonl`).
-/// 2. Fallback: most recently modified file.
+/// 2. Fallback: most recently modified file (excluding paths in `exclude`).
 fn find_best_session_file(
     agent: &dyn crate::agent::Agent,
     cwd: &str,
     agent_session_id: Option<&str>,
+    exclude: &HashSet<PathBuf>,
 ) -> Option<std::path::PathBuf> {
     let all_files = agent.list_session_files(cwd);
 
-    // 1. Direct match by agent session ID.
+    // 1. Direct match by agent session ID (not subject to exclusion).
     if let Some(id) = agent_session_id
         && let Some(path) = all_files.iter().find(|p| {
             p.file_stem()
@@ -431,9 +510,10 @@ fn find_best_session_file(
         return None;
     }
 
-    // 2. Fallback: most recently modified file.
+    // 2. Fallback: most recently modified file, excluding assigned paths.
     all_files
         .into_iter()
+        .filter(|p| !exclude.contains(p))
         .filter_map(|p| {
             let mtime = p.metadata().ok()?.modified().ok()?;
             Some((p, mtime))
@@ -528,7 +608,8 @@ mod tests {
             files: vec![target.clone(), other],
         };
 
-        let result = find_best_session_file(&agent, "/tmp/test", Some("abc-123"));
+        let empty = HashSet::new();
+        let result = find_best_session_file(&agent, "/tmp/test", Some("abc-123"), &empty);
         assert_eq!(result, Some(target));
     }
 
@@ -545,14 +626,16 @@ mod tests {
             files: vec![old, new.clone()],
         };
 
-        let result = find_best_session_file(&agent, "/tmp/test", None);
+        let empty = HashSet::new();
+        let result = find_best_session_file(&agent, "/tmp/test", None, &empty);
         assert_eq!(result, Some(new));
     }
 
     #[test]
     fn find_returns_none_when_no_files() {
         let agent = MockAgent { files: vec![] };
-        let result = find_best_session_file(&agent, "/tmp/test", None);
+        let empty = HashSet::new();
+        let result = find_best_session_file(&agent, "/tmp/test", None, &empty);
         assert!(result.is_none());
     }
 
@@ -569,7 +652,28 @@ mod tests {
             files: vec![f1, f2.clone()],
         };
 
-        let result = find_best_session_file(&agent, "/tmp/test", None);
+        let empty = HashSet::new();
+        let result = find_best_session_file(&agent, "/tmp/test", None, &empty);
         assert_eq!(result, Some(f2));
+    }
+
+    #[test]
+    fn find_excludes_assigned_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let f1 = dir.path().join("aaa.jsonl");
+        let f2 = dir.path().join("bbb.jsonl");
+        std::fs::File::create(&f1).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::File::create(&f2).unwrap();
+
+        let agent = MockAgent {
+            files: vec![f1.clone(), f2.clone()],
+        };
+
+        // f2 is the newest but is excluded — should fall back to f1.
+        let mut exclude = HashSet::new();
+        exclude.insert(f2);
+        let result = find_best_session_file(&agent, "/tmp/test", None, &exclude);
+        assert_eq!(result, Some(f1));
     }
 }
