@@ -50,13 +50,6 @@ impl SessionManager {
             launch_args.push(settings_json);
         }
 
-        // Only snapshot pre-existing files when deterministic path is unavailable.
-        let pre_existing = if jsonl_path.is_some() {
-            Vec::new()
-        } else {
-            agent.list_session_files(cwd)
-        };
-
         let events_dir = crate::hooks::events_dir().to_string_lossy().into_owned();
         let env_pairs: Vec<(&str, &str)> = vec![
             ("CHATMUX_SESSION", &name),
@@ -69,7 +62,6 @@ impl SessionManager {
         let mut session = Session::new(name, cwd.to_string(), agent.kind());
         session.agent_session_id = Some(session_uuid);
         session.jsonl_path = jsonl_path;
-        session.pre_existing_files = pre_existing;
         self.sessions.push(session);
         Ok(self.sessions.len() - 1)
     }
@@ -234,7 +226,6 @@ impl SessionManager {
                         session.branch = entry.branch;
                     }
                     session.agent_session_id = entry.agent_session_id;
-                    session.created_epoch = entry.created_epoch;
                     // Restore last activity from saved epoch or JSONL file mtime.
                     let file_epoch = session
                         .jsonl_path
@@ -318,7 +309,7 @@ impl SessionManager {
                     jsonl_len: s.jsonl_stamp.map(|st| st.len),
                     branch: s.branch.clone(),
                     agent_session_id: s.agent_session_id.clone(),
-                    created_epoch: s.created_epoch,
+                    created_epoch: None,
                 })
                 .collect(),
             next_id: self.next_id,

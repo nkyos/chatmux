@@ -373,23 +373,6 @@ impl TmuxClient {
         }
     }
 
-    /// Get the creation time (Unix epoch) of a tmux session.
-    pub fn get_session_created(&self, session_name: &str) -> Option<u64> {
-        let full_name = format!("{SESSION_PREFIX}{session_name}");
-        let output = Command::new("tmux")
-            .args(["display-message", "-t", &full_name, "-p", "#{session_created}"])
-            .output()
-            .ok()?;
-        if output.status.success() {
-            String::from_utf8_lossy(&output.stdout)
-                .trim()
-                .parse::<u64>()
-                .ok()
-        } else {
-            None
-        }
-    }
-
     /// Check if the pane in a tmux session has exited (process dead, pane remains).
     pub fn is_pane_dead(&self, session_name: &str) -> bool {
         let full_name = format!("{SESSION_PREFIX}{session_name}");

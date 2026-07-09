@@ -5,7 +5,7 @@ TUI session manager for AI coding agents. Run multiple [Claude Code](https://git
 ## Features
 
 - **Multi-session management** — Create, switch, rename, and delete agent sessions from a single terminal
-- **Live status detection** — Monitors JSONL output files to detect Working / Replied / Read states
+- **Live status detection** — Uses Claude Code hooks for instant push-based status updates (Working / Replied / InputRequired / Read); JSONL polling as fallback for Codex
 - **macOS notifications** — Get notified when an agent finishes, with a snippet of the reply
 - **Session persistence** — Sessions survive app restarts (backed by tmux)
 - **Project grouping** — View sessions grouped by project directory
@@ -96,6 +96,17 @@ status_replied = "red"
 status_read = "green"
 # Supports: color names, hex (#RRGGBB)
 ```
+
+## How Status Detection Works
+
+**Claude Code sessions** use hooks (`--settings` with `SessionStart`, `UserPromptSubmit`, `Stop`, `Notification`) for instant push-based status updates. Each session gets a deterministic UUID (`--session-id`), so JSONL file association is exact — no heuristic matching needed.
+
+**Codex sessions** fall back to JSONL file polling since Codex doesn't support hooks.
+
+If hooks aren't working, check that:
+- `~/.local/state/chatmux/hooks/claude-hook.sh` exists and is executable
+- The `CHATMUX_SESSION` environment variable is set inside the tmux pane
+- Press `x` in the sidebar to force a status re-read, or `X` to re-resolve the JSONL file
 
 ## License
 

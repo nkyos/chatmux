@@ -126,34 +126,14 @@ impl App {
                     .unwrap_or_default();
 
                 let has_client = self.manager.tmux().has_attached_client(name);
-                let created_epoch = self.manager.tmux().get_session_created(name);
-                (name.clone(), cwd, agent_kind, has_client, created_epoch)
+                (name.clone(), cwd, agent_kind, has_client)
             })
             .collect();
 
-        for (name, cwd, agent_kind, has_client, created_epoch) in new_sessions {
+        for (name, cwd, agent_kind, has_client) in new_sessions {
             let mut session =
                 crate::session::Session::new(name.clone(), cwd.clone(), agent_kind);
             session.attached_externally = has_client;
-            session.created_epoch = created_epoch;
-
-            // For externally discovered sessions, compute pre_existing_files
-            // using the tmux session's creation time. Files created before the
-            // session was created cannot belong to this session.
-            if let Some(epoch) = created_epoch {
-                let created_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch);
-                let agent = self.registry.get(agent_kind);
-                session.pre_existing_files = agent
-                    .list_session_files(&cwd)
-                    .into_iter()
-                    .filter(|p| {
-                        p.metadata()
-                            .ok()
-                            .and_then(|m| m.created().or_else(|_| m.modified()).ok())
-                            .is_some_and(|t| t < created_time)
-                    })
-                    .collect();
-            }
 
             self.manager.sessions_mut().push(session);
 
@@ -192,15 +172,6 @@ impl App {
         let notify_statuses = self.config.notifications.statuses.clone();
         let sound = self.config.notifications.sound.clone();
 
-        // Collect already-assigned JSONL paths and accumulate new assignments
-        // during the loop to prevent multiple sessions from claiming the same file.
-        let mut assigned: Vec<std::path::PathBuf> = self
-            .manager
-            .sessions()
-            .iter()
-            .filter_map(|s| s.jsonl_path.clone())
-            .collect();
-
         // Pre-collect pane commands so we can check if agents are still running
         // without borrowing self.manager immutably inside the mutable loop.
         let pane_commands: std::collections::HashMap<String, String> = self
@@ -221,7 +192,6 @@ impl App {
         for session in self.manager.sessions_mut() {
             let agent_adapter = registry.get(session.agent_kind);
 
-            // Resolve the session file path.
             // Resolve the JSONL file path.
             // Sessions with a deterministic agent_session_id skip heuristic
             // resolution: the JSONL file may not exist yet (created on first
@@ -236,15 +206,9 @@ impl App {
 
                 if needs_resolve {
                     session.jsonl_stamp = None;
-                    let mut exclude = session.pre_existing_files.clone();
-                    for p in &assigned {
-                        exclude.push(p.clone());
-                    }
                     let found = find_best_session_file(
                         agent_adapter,
                         &session.cwd,
-                        &exclude,
-                        session.created_epoch,
                         session.agent_session_id.as_deref(),
                     );
                     if found.is_none()
@@ -258,10 +222,6 @@ impl App {
                     {
                         session.agent_session_id = None;
                     }
-                    if let Some(ref path) = found
-                        && !assigned.contains(path) {
-                            assigned.push(path.clone());
-                        }
                     session.jsonl_path = found;
                 }
             }
@@ -290,47 +250,6 @@ impl App {
             if !file_changed {
                 let agent_running = pane_commands.get(&session.name)
                     .is_some_and(|cmd| matches!(cmd.as_str(), "claude" | "codex" | "node"));
-
-                // /clear detection: if the agent is still running but its
-                // JSONL file stopped changing, look for a newer file that is
-                // actively being written to.  Only switch if the candidate was
-                // modified very recently (within 3s), which means it's the file
-                // the agent is currently writing — not a leftover from another
-                // session.  This prevents false switches for idle sessions.
-                if agent_running && session.agent_session_id.is_some() {
-                    let now = std::time::SystemTime::now();
-                    let recency_threshold = std::time::Duration::from_secs(3);
-                    let own_mtime = session.jsonl_stamp.and_then(|s| s.modified);
-
-                    let all_files = agent_adapter.list_session_files(&session.cwd);
-                    let newest = all_files
-                        .into_iter()
-                        .filter(|p| !session.pre_existing_files.contains(p))
-                        .filter(|p| !assigned.contains(p))
-                        .filter(|p| session.jsonl_path.as_ref() != Some(p))
-                        .filter_map(|p| {
-                            let mtime = p.metadata().ok()?.modified().ok()?;
-                            // Must be newer than our current file.
-                            if own_mtime.is_some_and(|own| mtime <= own) {
-                                return None;
-                            }
-                            // Must have been written to recently (actively in use).
-                            if now.duration_since(mtime).ok()? > recency_threshold {
-                                return None;
-                            }
-                            Some((p, mtime))
-                        })
-                        .max_by_key(|(_, mtime)| *mtime)
-                        .map(|(p, _)| p);
-
-                    if let Some(new_path) = newest {
-                        assigned.push(new_path.clone());
-                        session.jsonl_path = Some(new_path);
-                        session.jsonl_stamp = None;
-                        session.agent_session_id = None;
-                        continue;
-                    }
-                }
 
                 // Agent exited: if the pane fell back to a shell while status
                 // is Working, the agent exited without writing end_turn.
@@ -480,21 +399,21 @@ impl App {
 }
 
 /// Find the best session file for a chatmux session.
+/// This is a minimal fallback for codex and picker sessions that lack
+/// a deterministic session ID. Claude sessions with --session-id use
+/// hooks-based detection and never reach this path.
 ///
 /// Resolution order:
-/// 1. Direct match by `agent_session_id` (filename = `{id}.jsonl`) — most reliable.
-/// 2. Birthtime match: file whose creation time is closest to `created_epoch`.
-/// 3. Fallback: oldest file by creation time.
+/// 1. Direct match by `agent_session_id` (filename = `{id}.jsonl`).
+/// 2. Fallback: most recently modified file.
 fn find_best_session_file(
     agent: &dyn crate::agent::Agent,
     cwd: &str,
-    exclude: &[std::path::PathBuf],
-    created_epoch: Option<u64>,
     agent_session_id: Option<&str>,
 ) -> Option<std::path::PathBuf> {
     let all_files = agent.list_session_files(cwd);
 
-    // 1. Direct match by agent session ID (most reliable).
+    // 1. Direct match by agent session ID.
     if let Some(id) = agent_session_id
         && let Some(path) = all_files.iter().find(|p| {
             p.file_stem()
@@ -505,47 +424,19 @@ fn find_best_session_file(
         return Some(path.clone());
     }
 
-    let candidates: Vec<std::path::PathBuf> = all_files
-        .into_iter()
-        .filter(|p| !exclude.contains(p))
-        .collect();
-
-    if candidates.is_empty() {
+    if all_files.is_empty() {
         return None;
     }
 
-    // 2. Birthtime match: prefer the file whose birthtime is closest to
-    //    (and after) the session's creation time.
-    if let Some(epoch) = created_epoch {
-        let session_time =
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(epoch);
-        let mut best: Option<(std::path::PathBuf, std::time::Duration)> = None;
-        for p in &candidates {
-            if let Ok(meta) = p.metadata() {
-                let file_time = meta.created().or_else(|_| meta.modified()).ok();
-                if let Some(t) = file_time
-                    && let Ok(diff) = t.duration_since(session_time)
-                        && best.as_ref().is_none_or(|(_, d)| diff < *d) {
-                            best = Some((p.clone(), diff));
-                        }
-            }
-        }
-        if let Some((path, _)) = best {
-            return Some(path);
-        }
-    }
-
-    // 3. Fallback: pick the oldest file by creation time.
-    let mut with_time: Vec<(std::path::PathBuf, std::time::SystemTime)> = candidates
+    // 2. Fallback: most recently modified file.
+    all_files
         .into_iter()
         .filter_map(|p| {
-            let meta = p.metadata().ok()?;
-            let t = meta.created().or_else(|_| meta.modified()).ok()?;
-            Some((p, t))
+            let mtime = p.metadata().ok()?.modified().ok()?;
+            Some((p, mtime))
         })
-        .collect();
-    with_time.sort_by_key(|(_, t)| *t);
-    with_time.into_iter().next().map(|(p, _)| p)
+        .max_by_key(|(_, t)| *t)
+        .map(|(p, _)| p)
 }
 
 /// Apply a detected status to a session, sending notifications if configured.
@@ -634,70 +525,36 @@ mod tests {
             files: vec![target.clone(), other],
         };
 
-        let result = find_best_session_file(&agent, "/tmp/test", &[], None, Some("abc-123"));
+        let result = find_best_session_file(&agent, "/tmp/test", Some("abc-123"));
         assert_eq!(result, Some(target));
     }
 
     #[test]
-    fn find_excludes_pre_existing_files() {
+    fn find_returns_most_recent_without_id() {
         let dir = tempfile::tempdir().unwrap();
         let old = dir.path().join("old.jsonl");
         let new = dir.path().join("new.jsonl");
         std::fs::File::create(&old).unwrap();
-        // Small delay to ensure different timestamps.
         std::thread::sleep(std::time::Duration::from_millis(10));
         std::fs::File::create(&new).unwrap();
 
         let agent = MockAgent {
-            files: vec![old.clone(), new.clone()],
+            files: vec![old, new.clone()],
         };
 
-        let result = find_best_session_file(&agent, "/tmp/test", &[old], None, None);
+        let result = find_best_session_file(&agent, "/tmp/test", None);
         assert_eq!(result, Some(new));
-    }
-
-    #[test]
-    fn find_returns_none_when_all_excluded() {
-        let dir = tempfile::tempdir().unwrap();
-        let f = dir.path().join("only.jsonl");
-        std::fs::File::create(&f).unwrap();
-
-        let agent = MockAgent {
-            files: vec![f.clone()],
-        };
-
-        let result = find_best_session_file(&agent, "/tmp/test", &[f], None, None);
-        assert!(result.is_none());
     }
 
     #[test]
     fn find_returns_none_when_no_files() {
         let agent = MockAgent { files: vec![] };
-        let result = find_best_session_file(&agent, "/tmp/test", &[], None, None);
+        let result = find_best_session_file(&agent, "/tmp/test", None);
         assert!(result.is_none());
     }
 
     #[test]
-    fn find_id_match_ignores_exclude_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("my-id.jsonl");
-        std::fs::File::create(&target).unwrap();
-
-        let agent = MockAgent {
-            files: vec![target.clone()],
-        };
-
-        // Even if the file is in the exclude list, ID match should still find it.
-        let result =
-            find_best_session_file(&agent, "/tmp/test", &[target.clone()], None, Some("my-id"));
-        assert_eq!(result, Some(target));
-    }
-
-    #[test]
-    fn b1_bug_none_session_id_skips_id_match() {
-        // B1 bug: agent_session_id was set to None before being passed to
-        // find_best_session_file. This test verifies that when agent_session_id
-        // is None, the function falls through to birthtime/fallback matching.
+    fn find_none_session_id_uses_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let f1 = dir.path().join("aaa.jsonl");
         let f2 = dir.path().join("bbb.jsonl");
@@ -706,11 +563,10 @@ mod tests {
         std::fs::File::create(&f2).unwrap();
 
         let agent = MockAgent {
-            files: vec![f1.clone(), f2],
+            files: vec![f1, f2.clone()],
         };
 
-        // With None session_id, should fall through to birthtime/oldest match.
-        let result = find_best_session_file(&agent, "/tmp/test", &[], None, None);
-        assert!(result.is_some());
+        let result = find_best_session_file(&agent, "/tmp/test", None);
+        assert_eq!(result, Some(f2));
     }
 }

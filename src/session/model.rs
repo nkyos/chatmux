@@ -120,9 +120,6 @@ pub struct Session {
     pub jsonl_path: Option<PathBuf>,
     /// Last known file stamp (mtime + len) of the JSONL file.
     pub jsonl_stamp: Option<FileStamp>,
-    /// Session files that existed before this session was created.
-    /// Used to exclude them when resolving this session's JSONL file.
-    pub pre_existing_files: Vec<PathBuf>,
     /// True when an external tmux client is directly attached to this session.
     /// TUI skips resizing while this is true.
     pub attached_externally: bool,
@@ -130,9 +127,6 @@ pub struct Session {
     pub branch: Option<String>,
     /// Agent-side session ID (UUID) for resume support.
     pub agent_session_id: Option<String>,
-    /// Unix epoch when this session was created. Used for birthtime-based
-    /// JSONL file matching when multiple sessions share the same cwd.
-    pub created_epoch: Option<u64>,
 }
 
 impl Session {
@@ -158,11 +152,9 @@ impl Session {
             last_activity_epoch: epoch,
             jsonl_path: None,
             jsonl_stamp: None,
-            pre_existing_files: Vec::new(),
             attached_externally: false,
             branch,
             agent_session_id: None,
-            created_epoch: Some(epoch),
         }
     }
 

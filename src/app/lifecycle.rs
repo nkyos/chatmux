@@ -133,9 +133,6 @@ impl App {
                 if let Some(epoch) = entry.last_activity_epoch {
                     session.set_activity_from_epoch(epoch);
                 }
-                if entry.created_epoch.is_some() {
-                    session.created_epoch = entry.created_epoch;
-                }
                 if let Some(ref path_str) = entry.session_file {
                     let path = std::path::PathBuf::from(path_str);
                     if path.exists() {
