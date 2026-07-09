@@ -268,20 +268,76 @@ impl TmuxClient {
     }
 
     /// List all chatmux-managed tmux sessions that are still alive.
-    /// Returns session names without the "chatmux-" prefix.
-    pub fn list_chatmux_sessions(&self) -> Vec<String> {
+    /// Returns `None` when tmux fails in a way that does not mean "no
+    /// sessions" (e.g. exec failure), so callers can avoid treating live
+    /// sessions as dead on a transient error.
+    pub fn try_list_chatmux_sessions(&self) -> Option<Vec<String>> {
         let output = Command::new("tmux")
             .args(["list-sessions", "-F", "#{session_name}"])
-            .output();
-
-        let Ok(output) = output else {
-            return Vec::new();
-        };
+            .output()
+            .ok()?;
 
         if !output.status.success() {
-            return Vec::new();
+            // tmux exits non-zero when no server is running; that genuinely
+            // means zero sessions, unlike other failures.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("no server running")
+                || stderr.contains("No such file or directory")
+            {
+                return Some(Vec::new());
+            }
+            return None;
         }
 
+        Some(
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.strip_prefix(SESSION_PREFIX))
+                .map(|s| s.to_string())
+                .collect(),
+        )
+    }
+
+    /// List all chatmux-managed tmux sessions, treating errors as empty.
+    /// Returns session names without the "chatmux-" prefix.
+    pub fn list_chatmux_sessions(&self) -> Vec<String> {
+        self.try_list_chatmux_sessions().unwrap_or_default()
+    }
+
+    /// Get the current pane command for every chatmux session in a single
+    /// tmux call. Returns a map of session name (without prefix) → command.
+    pub fn list_pane_commands(&self) -> std::collections::HashMap<String, String> {
+        let output = Command::new("tmux")
+            .args(["list-panes", "-a", "-F", "#{session_name}\t#{pane_current_command}"])
+            .output();
+        let Ok(output) = output else {
+            return Default::default();
+        };
+        if !output.status.success() {
+            return Default::default();
+        }
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| {
+                let (session, cmd) = line.split_once('\t')?;
+                let name = session.strip_prefix(SESSION_PREFIX)?;
+                Some((name.to_string(), cmd.to_string()))
+            })
+            .collect()
+    }
+
+    /// List chatmux sessions that have at least one attached client,
+    /// in a single tmux call.
+    pub fn list_attached_sessions(&self) -> std::collections::HashSet<String> {
+        let output = Command::new("tmux")
+            .args(["list-clients", "-F", "#{client_session}"])
+            .output();
+        let Ok(output) = output else {
+            return Default::default();
+        };
+        if !output.status.success() {
+            return Default::default();
+        }
         String::from_utf8_lossy(&output.stdout)
             .lines()
             .filter_map(|line| line.strip_prefix(SESSION_PREFIX))
@@ -317,28 +373,19 @@ impl TmuxClient {
             ])
             .output()
             .ok();
+        // Parse as u32 and saturate: history can exceed u16::MAX when the
+        // user's tmux config raises history-limit, and a failed parse would
+        // silently disable scrollback.
         output
             .filter(|o| o.status.success())
             .and_then(|o| {
                 String::from_utf8_lossy(&o.stdout)
                     .trim()
-                    .parse::<u16>()
+                    .parse::<u32>()
                     .ok()
             })
+            .map(|v| v.min(u16::MAX as u32) as u16)
             .unwrap_or(0)
-    }
-
-    /// Check if a tmux session has any attached clients.
-    /// Returns true if someone is directly attached (e.g. via `chatmux claude`).
-    pub fn has_attached_client(&self, session_name: &str) -> bool {
-        let full_name = format!("{SESSION_PREFIX}{session_name}");
-        let output = Command::new("tmux")
-            .args(["list-clients", "-t", &full_name, "-F", "#{client_name}"])
-            .output()
-            .ok();
-        output
-            .filter(|o| o.status.success())
-            .is_some_and(|o| !o.stdout.is_empty())
     }
 
     /// Get the original start command of a tmux session's pane.

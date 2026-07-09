@@ -429,8 +429,10 @@ impl App {
             self.auto_sort();
         }
 
-        // Periodically auto-save state for crash recovery.
-        if !self.manager.is_empty() && self.last_auto_save.elapsed() >= self.config.polling.auto_save() {
+        // Periodically auto-save state for crash recovery. Also saves when
+        // empty: keeping a stale non-empty state file would offer a cold
+        // restore of already-ended sessions after a crash.
+        if self.last_auto_save.elapsed() >= self.config.polling.auto_save() {
             self.last_auto_save = Instant::now();
             self.manager.save_state();
         }
@@ -744,8 +746,11 @@ impl App {
 
     /// Save session state without killing sessions (for crash/panic recovery).
     pub fn save_state_for_crash_recovery(&self) {
-        if !self.manager.is_empty() {
-            self.manager.save_state();
+        // Skip while on the startup screen: the manager is still empty there
+        // and saving would clobber the state we may want to restore.
+        if matches!(self.mode, AppMode::Startup { .. }) {
+            return;
         }
+        self.manager.save_state();
     }
 }

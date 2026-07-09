@@ -37,7 +37,37 @@ fn main() -> Result<()> {
         }
     }
 
+    // Single-instance guard: two TUIs would race on hook event draining,
+    // sessions.json saves, and pane resizing. The flock is released
+    // automatically when the process exits, even on SIGKILL.
+    let _lock = match acquire_instance_lock() {
+        Ok(file) => file,
+        Err(e) => {
+            eprintln!("chatmux: {e}");
+            std::process::exit(1);
+        }
+    };
+
     run_tui()
+}
+
+/// Acquire an exclusive advisory lock to prevent running two chatmux TUIs.
+/// The returned file must be kept alive for the process lifetime.
+fn acquire_instance_lock() -> Result<std::fs::File> {
+    use std::os::fd::AsRawFd;
+
+    let dir = hooks::state_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("chatmux.lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        anyhow::bail!("another chatmux instance is already running");
+    }
+    Ok(file)
 }
 
 fn run_tui() -> Result<()> {

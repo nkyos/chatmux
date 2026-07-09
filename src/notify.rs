@@ -1,5 +1,10 @@
 use std::process::Command;
 
+/// Escape a string for embedding in an AppleScript string literal.
+fn escape_applescript(s: &str) -> String {
+    s.replace('\\', r"\\").replace('"', r#"\""#)
+}
+
 /// Truncate a string to at most `max_chars` characters, appending "…" if truncated.
 fn truncate(s: &str, max_chars: usize) -> String {
     let trimmed = s.trim();
@@ -87,8 +92,12 @@ fn send_notification(project_name: &str, status: &str, sound: &str, last_reply: 
     } else {
         format!("{subtitle}\n{body}")
     };
-    // Escape double quotes for AppleScript.
-    let display_msg = display_msg.replace('"', r#"\""#);
+    // Escape for AppleScript string literals: backslashes first, then quotes.
+    // Escaping quotes alone is not enough — input like `\"` would become `\\"`,
+    // where `\\` is a literal backslash and the quote terminates the string,
+    // allowing AppleScript injection via agent reply text.
+    let display_msg = escape_applescript(&display_msg);
+    let sound = escape_applescript(sound);
     let script = format!(
         r#"display notification "{display_msg}" with title "chatmux" sound name "{sound}""#
     );

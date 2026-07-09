@@ -74,13 +74,14 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "chatmux"
-version = "0.3.0"
+version = "0.4.1"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
  "base64",
  "crossterm 0.29.0",
  "dirs",
+ "libc",
  "notify",
  "ratatui",
  "serde",

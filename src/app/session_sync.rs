@@ -81,12 +81,14 @@ impl App {
     /// Also removes sessions whose tmux session has died, and picks up
     /// spool metadata from CLI-created sessions.
     pub(super) fn discover_external_sessions(&mut self) {
-        let live: std::collections::HashSet<String> = self
-            .manager
-            .tmux()
-            .list_chatmux_sessions()
-            .into_iter()
-            .collect();
+        // Skip the whole cycle when tmux fails unexpectedly: an empty result
+        // from a transient error would make every session look dead and wipe
+        // their tracking metadata.
+        let Some(live_list) = self.manager.tmux().try_list_chatmux_sessions() else {
+            return;
+        };
+        let live: std::collections::HashSet<String> = live_list.into_iter().collect();
+        let attached = self.manager.tmux().list_attached_sessions();
 
         // Remove dead sessions (tmux session no longer exists).
         let had_dead = self.manager.sessions().iter().any(|s| !live.contains(&s.name));
@@ -121,12 +123,11 @@ impl App {
             .map(|name| {
                 // Check spool file for metadata first.
                 if let Some((_, spool)) = pending.iter().find(|(n, _)| n == name) {
-                    let has_client = self.manager.tmux().has_attached_client(name);
                     return (
                         name.clone(),
                         spool.cwd.clone(),
                         spool.agent_kind,
-                        has_client,
+                        attached.contains(name),
                         Some(spool),
                     );
                 }
@@ -142,8 +143,7 @@ impl App {
                     .or_else(|| self.detect_agent_kind(name))
                     .unwrap_or_default();
 
-                let has_client = self.manager.tmux().has_attached_client(name);
-                (name.clone(), cwd, agent_kind, has_client, None)
+                (name.clone(), cwd, agent_kind, attached.contains(name), None)
             })
             .collect();
 
@@ -174,15 +174,12 @@ impl App {
         crate::spool::cleanup_stale(&live, 3600);
 
         // Update attached_externally flag for all tracked sessions.
-        let attach_status: Vec<_> = self.manager.sessions()
-            .iter()
-            .map(|s| self.manager.tmux().has_attached_client(&s.name))
-            .collect();
-        for (session, attached) in self.manager.sessions_mut().iter_mut().zip(attach_status) {
-            if session.attached_externally && !attached {
+        for session in self.manager.sessions_mut() {
+            let is_attached = attached.contains(&session.name);
+            if session.attached_externally && !is_attached {
                 session.applied_size = None;
             }
-            session.attached_externally = attached;
+            session.attached_externally = is_attached;
         }
     }
 
@@ -206,19 +203,10 @@ impl App {
         let notify_statuses = self.config.notifications.statuses.clone();
         let sound = self.config.notifications.sound.clone();
 
-        // Pre-collect pane commands so we can check if agents are still running
-        // without borrowing self.manager immutably inside the mutable loop.
-        let pane_commands: std::collections::HashMap<String, String> = self
-            .manager
-            .sessions()
-            .iter()
-            .filter_map(|s| {
-                self.manager
-                    .tmux()
-                    .get_pane_command(&s.name)
-                    .map(|cmd| (s.name.clone(), cmd))
-            })
-            .collect();
+        // Pre-collect pane commands (one tmux call for all sessions) so we can
+        // check if agents are still running without borrowing self.manager
+        // immutably inside the mutable loop.
+        let pane_commands = self.manager.tmux().list_pane_commands();
 
         // Build the set of assigned JSONL paths to prevent fallback collisions.
         let assigned_paths: HashSet<PathBuf> = self

@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-fn state_dir() -> PathBuf {
+pub(crate) fn state_dir() -> PathBuf {
     dirs::state_dir()
         .or_else(dirs::data_local_dir)
         .unwrap_or_else(|| PathBuf::from("/tmp"))
@@ -16,14 +16,18 @@ pub fn events_dir() -> PathBuf {
 }
 
 const HOOK_SCRIPT: &str = r#"#!/bin/bash
-# chatmux hook relay — appends Claude Code hook events to a per-session event file.
+# chatmux hook relay — writes each Claude Code hook event to its own file.
 # CHATMUX_SESSION is set by chatmux via `tmux new-session -e`.
 # If not set, this hook is a no-op (allows claude to run outside chatmux).
 [ -z "$CHATMUX_SESSION" ] && exit 0
 
 EVENTS_DIR="${CHATMUX_EVENTS_DIR:-$HOME/.local/state/chatmux/events}"
 mkdir -p "$EVENTS_DIR"
-cat >> "$EVENTS_DIR/${CHATMUX_SESSION}.jsonl"
+
+# Write to a hidden temp file first, then rename: the .evt file appears
+# atomically, so the reader never sees a partially written event.
+evt="${CHATMUX_SESSION}.$$.${RANDOM}${RANDOM}.evt"
+cat > "$EVENTS_DIR/.$evt.tmp" && mv "$EVENTS_DIR/.$evt.tmp" "$EVENTS_DIR/$evt"
 "#;
 
 /// Write the hook relay script to disk (idempotent).
@@ -88,6 +92,33 @@ pub struct HookEvent {
     pub source: Option<String>,
 }
 
+/// Build a HookEvent from a parsed JSON value.
+fn event_from_value(val: &serde_json::Value) -> Option<HookEvent> {
+    Some(HookEvent {
+        hook_event_name: val
+            .get("hook_event_name")?
+            .as_str()?
+            .to_string(),
+        session_id: val
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        transcript_path: val
+            .get("transcript_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        prompt: val
+            .get("prompt")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        last_assistant_message: extract_last_assistant_text(val),
+        source: val
+            .get("source")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+    })
+}
+
 /// Parse JSONL content into HookEvent entries.
 fn parse_events(content: &str) -> Vec<HookEvent> {
     content
@@ -98,56 +129,68 @@ fn parse_events(content: &str) -> Vec<HookEvent> {
                 return None;
             }
             let val: serde_json::Value = serde_json::from_str(line).ok()?;
-            Some(HookEvent {
-                hook_event_name: val
-                    .get("hook_event_name")?
-                    .as_str()?
-                    .to_string(),
-                session_id: val
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                transcript_path: val
-                    .get("transcript_path")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                prompt: val
-                    .get("prompt")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-                last_assistant_message: extract_last_assistant_text(&val),
-                source: val
-                    .get("source")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string()),
-            })
+            event_from_value(&val)
         })
         .collect()
 }
 
-/// Read and drain all pending events for a chatmux session.
-/// Uses atomic rename to avoid losing events appended between read and truncate.
-pub fn drain_events(session_name: &str) -> Vec<HookEvent> {
-    let dir = events_dir();
-    let path = dir.join(format!("{session_name}.jsonl"));
-    let processing = dir.join(format!("{session_name}.jsonl.processing"));
+/// Parse the content of a single .evt file (one JSON event, possibly
+/// pretty-printed). Falls back to line-based parsing.
+fn parse_event_file(content: &str) -> Vec<HookEvent> {
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(content) {
+        return event_from_value(&val).into_iter().collect();
+    }
+    parse_events(content)
+}
 
-    // 1. Recover crash remnant from a previous drain.
+/// Read and drain all pending events for a chatmux session.
+///
+/// The hook script writes one file per event (`{name}.{pid}.{rand}.evt`)
+/// via atomic rename, so a file is only ever seen fully written — this
+/// avoids the torn reads possible with a shared append log. Files are
+/// processed in mtime order. Legacy append logs (`{name}.jsonl`) from
+/// older hook scripts are drained first.
+pub fn drain_events(session_name: &str) -> Vec<HookEvent> {
+    drain_events_in(&events_dir(), session_name)
+}
+
+fn drain_events_in(dir: &Path, session_name: &str) -> Vec<HookEvent> {
     let mut events = Vec::new();
-    if processing.exists() {
-        if let Ok(content) = std::fs::read_to_string(&processing) {
+
+    // Legacy append-log files written by older hook scripts.
+    let processing = dir.join(format!("{session_name}.jsonl.processing"));
+    let legacy = dir.join(format!("{session_name}.jsonl"));
+    for path in [&processing, &legacy] {
+        if let Ok(content) = std::fs::read_to_string(path) {
             events.extend(parse_events(&content));
+            let _ = std::fs::remove_file(path);
         }
-        let _ = std::fs::remove_file(&processing);
     }
 
-    // 2. Atomically rename the live file so new hook appends go to a fresh file.
-    if std::fs::rename(&path, &processing).is_ok() {
-        // 3. Read the renamed file and delete it.
-        if let Ok(content) = std::fs::read_to_string(&processing) {
-            events.extend(parse_events(&content));
+    // Per-event files, ordered by mtime.
+    let Ok(entries) = dir.read_dir() else {
+        return events;
+    };
+    let prefix = format!("{session_name}.");
+    let mut files: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let path = e.path();
+            let fname = path.file_name()?.to_str()?;
+            if !fname.starts_with(&prefix) || !fname.ends_with(".evt") {
+                return None;
+            }
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((mtime, path))
+        })
+        .collect();
+    files.sort_by_key(|(t, _)| *t);
+
+    for (_, path) in files {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            events.extend(parse_event_file(&content));
         }
-        let _ = std::fs::remove_file(&processing);
+        let _ = std::fs::remove_file(&path);
     }
 
     events
@@ -173,13 +216,27 @@ fn extract_last_assistant_text(val: &serde_json::Value) -> Option<String> {
 }
 
 /// Extract the session name from an event filename.
-/// Handles both `{name}.jsonl` and `{name}.jsonl.processing`.
+/// Handles per-event files (`{name}.{pid}.{rand}.evt`), their hidden temp
+/// files (`.{name}.{pid}.{rand}.evt.tmp`), and legacy append logs
+/// (`{name}.jsonl`, `{name}.jsonl.processing`). Session names contain no dots.
 fn event_file_session_name(path: &std::path::Path) -> Option<String> {
     let fname = path.file_name()?.to_str()?;
-    fname
+    if let Some(rest) = fname
         .strip_suffix(".jsonl.processing")
         .or_else(|| fname.strip_suffix(".jsonl"))
-        .map(|s| s.to_string())
+    {
+        return Some(rest.to_string());
+    }
+    if let Some(rest) = fname.strip_suffix(".evt") {
+        return rest.split('.').next().map(|s| s.to_string());
+    }
+    if let Some(rest) = fname
+        .strip_prefix('.')
+        .and_then(|r| r.strip_suffix(".evt.tmp"))
+    {
+        return rest.split('.').next().map(|s| s.to_string());
+    }
+    None
 }
 
 /// Clean up event files for sessions that no longer exist.
@@ -249,5 +306,67 @@ mod tests {
     fn event_file_session_name_processing() {
         let p = Path::new("/tmp/events/s0.jsonl.processing");
         assert_eq!(event_file_session_name(p), Some("s0".into()));
+    }
+
+    #[test]
+    fn event_file_session_name_evt() {
+        let p = Path::new("/tmp/events/s0.12345.6789.evt");
+        assert_eq!(event_file_session_name(p), Some("s0".into()));
+    }
+
+    #[test]
+    fn event_file_session_name_evt_tmp() {
+        let p = Path::new("/tmp/events/.xab12cd34.12345.6789.evt.tmp");
+        assert_eq!(event_file_session_name(p), Some("xab12cd34".into()));
+    }
+
+    #[test]
+    fn parse_event_file_single_object() {
+        let content = r#"{"hook_event_name":"Stop","session_id":"abc"}"#;
+        let events = parse_event_file(content);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].hook_event_name, "Stop");
+    }
+
+    #[test]
+    fn drain_events_reads_evt_files_in_mtime_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("s0.100.1.evt");
+        let second = dir.path().join("s0.100.2.evt");
+        std::fs::write(&first, r#"{"hook_event_name":"UserPromptSubmit"}"#).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&second, r#"{"hook_event_name":"Stop"}"#).unwrap();
+
+        let events = drain_events_in(dir.path(), "s0");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].hook_event_name, "UserPromptSubmit");
+        assert_eq!(events[1].hook_event_name, "Stop");
+        assert!(!first.exists());
+        assert!(!second.exists());
+    }
+
+    #[test]
+    fn drain_events_ignores_other_sessions_and_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = dir.path().join("s10.100.1.evt");
+        let tmp = dir.path().join(".s0.100.1.evt.tmp");
+        std::fs::write(&other, r#"{"hook_event_name":"Stop"}"#).unwrap();
+        std::fs::write(&tmp, r#"{"hook_event_name":"Stop"}"#).unwrap();
+
+        let events = drain_events_in(dir.path(), "s0");
+        assert!(events.is_empty());
+        assert!(other.exists());
+        assert!(tmp.exists());
+    }
+
+    #[test]
+    fn drain_events_reads_legacy_jsonl() {
+        let dir = tempfile::tempdir().unwrap();
+        let legacy = dir.path().join("s0.jsonl");
+        std::fs::write(&legacy, "{\"hook_event_name\":\"Stop\"}\n").unwrap();
+
+        let events = drain_events_in(dir.path(), "s0");
+        assert_eq!(events.len(), 1);
+        assert!(!legacy.exists());
     }
 }
